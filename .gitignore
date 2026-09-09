@@ -42,3 +42,6 @@ resource/official-chart/
 
 # 本地谱面预览环境（mai-notes player 的静态资源镜像 + 本地数据，仅本机预览用，不入库）
 resource/player-preview/
+
+# 调研子代理的中间抓取产物（第三方源码包/权重文件，仅本机参考，不入库）
+.research/
