@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.pnpm-store/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# 测试音频与临时文件（版权素材不得入库）
+*.mp3
+*.wav
+*.ogg
+*.flac
+/tmp/
