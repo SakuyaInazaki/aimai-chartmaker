@@ -30,16 +30,15 @@
 
 ### 待办（本阶段任务）
 
-- [ ] 调研 simai 语法规范，产出文档 `docs/simai-syntax.md`：
-  - note 类型与基础语法（TAP / HOLD / SLIDE / TOUCH / BREAK 等）
-  - 每拍分音、位置编号系统、小节/拍号/BPM 声明
-  - SLIDE 的轨迹写法与箭头 `*`、`>`、`<`、`^`、`v`、`p`、`q`、`s`、`z`、`V`、`w` 等符号含义
-  - meta 指令（`&title=`、`&artist=`、`&des=`、`&first=`、`&bpm=` 等）
-  - 特殊语法：EX note、修饰符、分段变速等
+- [x] 调研 simai 语法规范，产出文档 `docs/simai-syntax.md`（v1.0 定稿，2026-09-10）：
+  - 三路调研合流：官方 simai wiki（记法定义者 Celeca 规范）+ 社区解析器源码 + 中文社区教程；
+  - 原始调研报告存档于 `docs/research/`（official-spec-research.md / parser-source-analysis.md / chinese-community-research.md）；
+  - 结论要点：note 全类型语法、slide 12 形状与端点约束、启动拍机制（60/BPM 固定一拍）、meta 转义规则、零报错安全子集与禁用清单（§6）。
 - [ ] 调研 simai 报错/警告的判定逻辑，产出文档 `docs/simai-error-checking.md`：
   - 社区校验器（如 majdata / Simai 解析器 / 编辑器）的判错规则清单
   - 每类报错的触发条件与代码判定逻辑（如 note 位置越界、SLIDE 轨迹非法、HOLD 时长非法、语法 token 无法解析等）
   - 目标：让生成端的校验器实现与社区工具的行为一致
+  - 素材已就绪：`docs/research/parser-source-analysis.md` 第二部分（MajdataEdit SyntaxCheck 约 40 类判定、MajdataView 报错消息、SimaiSharp 异常体系）
 
 ## 设想的技术路线（草案，待 Phase 0 完成后细化）
 
@@ -73,4 +72,9 @@
 
 ## 参考资源（持续补充）
 
-- 在 `docs/simai-syntax.md` 与 `docs/simai-error-checking.md` 调研完成后，将主要参考资料与来源链接记录于此。
+- 官方 simai wiki（记法定义者 Celeca 的规范）：https://w.atwiki.jp/simai/pages/1003.html （Notations of simai）、pages/1002.html（日文）、pages/25.html（旧版全量手册）、pages/510.html（meta 变量）。⚠️ 该站有 Cloudflare 防护，调研时经 Wayback Machine 快照获取。
+- SimaiSharp（astrodx 官方解析器，本项目零报错校验基准）：https://github.com/reflektone-games/SimaiSharp
+- MajdataView / MajdataEdit：https://github.com/LingFeng-bbben/MajdataView ；wiki《怎样写谱？》
+- MaiLib：https://github.com/Neskol/MaiLib ；maidata-rs：https://github.com/xen0n/maidata-rs
+- 中文社区：MMFC《谱面创作基础学》（用户提供 PDF，`resource/` 本机）；无理综述系列（B站）；详见 `docs/research/chinese-community-research.md` 来源清单
+- 本仓库三份调研报告：`docs/research/` 下 official-spec-research.md / parser-source-analysis.md / chinese-community-research.md
