@@ -39,3 +39,6 @@ resource/*.txt
 # 官方谱面数据（抓取自 mai-notes.com，版权归 SEGA/原曲版权方，严禁入库）
 # 仅作本机研究参考
 resource/official-chart/
+
+# 本地谱面预览环境（mai-notes player 的静态资源镜像 + 本地数据，仅本机预览用，不入库）
+resource/player-preview/
