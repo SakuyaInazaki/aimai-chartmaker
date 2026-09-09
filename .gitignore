@@ -30,3 +30,8 @@ node_modules/
 *.ogg
 *.flac
 /tmp/
+
+# 用户本地提供的参考资料（保留在本机供 agent 阅读，不入库）
+# 说明见 resource/README.md
+resource/*.pdf
+resource/*.txt
