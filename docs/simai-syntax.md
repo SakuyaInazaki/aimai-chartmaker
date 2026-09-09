@@ -1,7 +1,7 @@
 # simai 语法规范（调研整理）
 
-> **状态**：v0.1 初稿（2026-09-10）。已综合：MMFC《谱面创作基础学》第四章（用户提供 PDF）、社区解析器源码分析（`docs/research/parser-source-analysis.md`）。
-> **待办**：官方 wiki 调研与中文社区调研完成后交叉核实并升版。
+> **状态**：v0.2（2026-09-10）。已综合：MMFC《谱面创作基础学》第四章（用户提供 PDF）、社区解析器源码分析、中文社区调研（`docs/research/` 下两份报告）。
+> **待办**：官方 wiki 调研完成后交叉核实并升版；v0.2 已就中文社区报告与初稿完成交叉印证（结论：三方一致，无推翻项，仅补充细节）。
 > **配套文档**：`docs/simai-error-checking.md`（报错判定逻辑，另文整理）。
 
 ## 0. 阅读说明
@@ -132,6 +132,8 @@
 
 基本写法：`<起始键位><形状><终止键位>[时长]`。例：`1-4[4:1]` = 从 1 到 4 的直线星星，时长一拍。
 
+> **启动拍机制（游戏语义，生成器必须建模）**：星星头被击打后**停 1 拍（一个四分音符）才开始滑动**，开始滑动的时刻称"启动拍"。`[x:y]` 中的 y 拍是滑动时长，星星头另有 1 拍等待（`[bpm#x:y]` 形式中等待=该 bpm 的 1 拍）。启动拍不可随意修改（乱改会产生撞尾/多押无理，见知识库 014）。
+
 #### 形状符号表
 
 | 符号 | 形状 | 端点约束 | 备注 |
@@ -240,13 +242,16 @@ Ch[4:1],E8f,1bx,4hb[8:2],2q8[4:2],E
 
 - MMFC《MAIMAI 谱面创作基础学 长篇指南》第四章（用户提供，`resource/`，本机）
 - `docs/research/parser-source-analysis.md`（MajdataView/MajdataEdit/SimaiSharp/MaiLib/maidata-rs 源码分析）
-- MajdataView wiki《怎样写谱？》：https://github.com/LingFeng-bbben/MajdataView/wiki
+- `docs/research/chinese-community-research.md`（中文社区调研：B站专栏/教程、无理综述系列、萌娘百科、官方谱面密度实测）
+- MajdataView wiki《怎样写谱？》：https://github.com/LingFeng-bbben/MajdataView/wiki/怎样写谱？
+- 3simaiFes 格式中文译（译自 simai 官方 wiki）：https://www.bilibili.com/opus/739441653140422663
 - SimaiSharp：https://github.com/reflektone-games/SimaiSharp
 - 官方 simai wiki（slide 时长语法出处）：https://w.atwiki.jp/simai/pages/25.html
-- （待补：官方 wiki 调研与中文社区调研来源）
+- （待补：官方 wiki 调研）
 
 ## 8. 存疑 / 待核实
 
-1. 官方 wiki 与中文社区调研完成后交叉核实（本初稿先基于 PDF + 解析器源码）。
+1. 官方 wiki 调研完成后做最终交叉核实。
 2. `[秒]`（无冒号）slide 时长在 MajdataEdit 解析器（非校验器）中是否可用，待实测。
 3. Touch 区字母与实际屏幕位置的对应（A-E 布局），以 majdata 判定区域图为准，待配图确认。
+4. v0.2 交叉印证结论：中文社区（MMFC PDF 同源 + MajdataView wiki + 3simaiFes 译本）与解析器源码三方对 slide 形状约束、同头 `*` 禁 `/`、384 分音上限、Touch C 区规则均一致，初稿无推翻项。
