@@ -34,11 +34,11 @@
   - 三路调研合流：官方 simai wiki（记法定义者 Celeca 规范）+ 社区解析器源码 + 中文社区教程；
   - 原始调研报告存档于 `docs/research/`（official-spec-research.md / parser-source-analysis.md / chinese-community-research.md）；
   - 结论要点：note 全类型语法、slide 12 形状与端点约束、启动拍机制（60/BPM 固定一拍）、meta 转义规则、零报错安全子集与禁用清单（§6）。
-- [ ] 调研 simai 报错/警告的判定逻辑，产出文档 `docs/simai-error-checking.md`：
-  - 社区校验器（如 majdata / Simai 解析器 / 编辑器）的判错规则清单
-  - 每类报错的触发条件与代码判定逻辑（如 note 位置越界、SLIDE 轨迹非法、HOLD 时长非法、语法 token 无法解析等）
-  - 目标：让生成端的校验器实现与社区工具的行为一致
-  - 素材已就绪：`docs/research/parser-source-analysis.md` 第二部分（MajdataEdit SyntaxCheck 约 40 类判定、MajdataView 报错消息、SimaiSharp 异常体系）
+- [x] 调研 simai 报错/警告的判定逻辑，产出文档 `docs/simai-error-checking.md`（v1.0 定稿，2026-09-10）：
+  - 调研原则（用户决策）：报错判定逻辑以**成熟解析器的实际实现行为**为准（majdata、visual maimai、miacode 等）；
+  - 已收录：MajdataEdit SyntaxCheck（15 组判定，源码行号级）、MajdataView 报错消息、SimaiSharp 5 类异常、MaiLib/maidata-rs、**MiaCode 34 类规则+双模式架构+Muri 检测**（源码级）、Visual Maimai（闭源，文档侧取证，置信度低）；
+  - 校验器实现蓝本见该文档 §10（四层校验 + 双检 + MiaCode slide_data.json 白名单与 SimaiParserSpec 回归用例借鉴）；
+  - 原始报告：`docs/research/parser-source-analysis.md`、`docs/research/miacode-vm-research.md`。
 
 ## 设想的技术路线（草案，待 Phase 0 完成后细化）
 

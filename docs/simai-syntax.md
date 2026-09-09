@@ -166,8 +166,9 @@
 SimaiSharp 另接受 `[#秒]`（移动秒数、等待默认一拍）。⚠️ `[秒]`（无冒号单值）MajdataEdit 校验器不认 → 生成器不用。
 
 #### 组合（连锁）SLIDE（FESTiVAL）
-- 多段首尾相接：`1-4q7-2[1:2]`（总时长写在最后，全程匀速）；或每段各自给时长 `1-4[2:1]q7[2:1]-2[1:1]`。
+- 多段首尾相接：`1-4q7-2[1:2]`（总时长写在最后，全程匀速）；或每段各自给时长 `1-4[2:1]q7[2:1]-2[1:1]`（官方允许）。
 - **官方：分段写时必须给全每一段时长，缺任一报错**；总时长形式与分段形式不可混用。
+- ⚠️ 跨工具：每段独立时长的写法（token 含 >1 个 `[…]`）在 **MiaCode strict 模式会报错**（"Slide 时值块位置可能导致转谱错误"）→ **生成器统一用"总时长在最后"形式 `1-4q7-2[1:2]`**。
 - 连锁 BREAK：只能在**最后一个 `]` 后**加 `b`，整条为 BREAK，不能局部 BREAK。
 
 #### 同始点 SLIDE（multi-slide）
@@ -224,7 +225,7 @@ Ch[4:1],E8f,1bx,4hb[8:2],2q8[4:2],E
    - ❌ Slide 上加 `x`（SimaiSharp 抛异常）
    - ❌ 装饰符 `@`、`m`；Hold 上的 `$`
    - ❌ slide 时长 `[秒]` 无冒号单值形式 → 用 `[x:y]` 或 `[秒##秒]`
-   - ❌ 组合星星时长混合写法 / 分段缺时长（SLIDE CHAIN ERROR）
+   - ❌ 组合星星时长混合写法 / 分段缺时长（SLIDE CHAIN ERROR）；连锁 slide 统一用"总时长在最后"形式（分段独立时长在 MiaCode strict 报错）
    - ❌ 同头星星用 `/` 分隔（重叠星星头）
    - ❌ `{#秒}`（官方合法但 MajdataEdit 校验器拒）→ 用 `(bpm){x}`
    - ❌ 单个 `|` 注释 → 用 `||`（且以换行结尾）
@@ -243,10 +244,12 @@ Ch[4:1],E8f,1bx,4hb[8:2],2q8[4:2],E
 - MajdataView/MajdataEdit：https://github.com/LingFeng-bbben/MajdataView 及 wiki《怎样写谱？》
 - MaiLib：https://github.com/Neskol/MaiLib ；maidata-rs：https://github.com/xen0n/maidata-rs
 - 中文社区：MMFC《谱面创作基础学》（用户提供 PDF）、3simaiFes 中文译 https://www.bilibili.com/opus/739441653140422663 、无理综述系列（详见 chinese-community-research.md）
+- MiaCode（slide 端点白名单 slide_data.json、双模式校验器）：https://github.com/fanfaredash/MiaCode
+- Visual Maimai（闭源，仅文档侧参考）：https://github.com/CH3COOOHH/Visual-Maimai-Release
 
 ## 8. 存疑 / 待核实
 
-1. **SLIDE 始点-终点关系表**：官方表为图片（https://img.atwiki.jp/simai/attach/1003/54/slides_eng.png ），64 格矩阵需人工/视觉模型对照补齐——生成器严格校验前必须完成。
+1. **SLIDE 始点-终点关系表**：官方表为图片（https://img.atwiki.jp/simai/attach/1003/54/slides_eng.png ），64 格矩阵需人工/视觉模型对照补齐。**已找到机读替代**：MiaCode 的 `assets/reference/slide_data.json` 提供 608 个合法 slide shape key + 8 个 wifi key 白名单（`^` 折叠为 `</>` 后查表），生成器校验可直接复用/对齐该数据源；人工对照图片仅作交叉验证。
 2. **扇形 w 的 3 个端点**：是否恒为"对角键 + 环上两邻键"需对照官方图或实测。
 3. **SimaiSharp 两处疑似 bug**：(a) 启动拍随 `{x}` 变化（官方固定 60/BPM 一拍）；(b) p 形序列化误输出 `pp`。本项目直接依赖 SimaiSharp 时要写回归测试。
 4. **`fi` 属性**：权威来源中不存在；最接近的是烟花 `f`。
