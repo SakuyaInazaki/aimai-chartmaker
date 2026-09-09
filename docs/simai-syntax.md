@@ -1,7 +1,7 @@
 # simai 语法规范（调研定稿）
 
 > **状态**：v1.0 定稿（2026-09-10）。三路调研合流：① 官方 simai wiki（记法定义者 Celeca 的规范，经 Wayback 快照）② 社区解析器源码分析（MajdataView/MajdataEdit/SimaiSharp/MaiLib/maidata-rs）③ 中文社区调研（MMFC 教程、B站教程、无理综述）。**交叉核实结论：核心语法三方一致，初稿无推翻项；分歧点全部标注于 §6/§8。**
-> **配套文档**：`docs/simai-error-checking.md`（报错判定逻辑，另文）；三份原始调研报告见 `docs/research/`。
+> **配套文档**：`docs/simai-error-checking.md`（报错判定逻辑，另文）；三份原始调研报告见 `docs/research/`；**ST 谱面要素年表与黑白名单见 `docs/st-chart-elements.md`**（本项目只生成 ST 谱，DX/FESTiVAL 要素禁用）。
 > **本项目定位**：生成器产出的 maidata.txt 需在 Majdata 生态与 AstroDX（SimaiSharp）中零报错。官方 simai 语为权威基准，Majdata 语法宽松（其 README 自述），不能作为兼容性基准。
 
 ## 0. 阅读说明
