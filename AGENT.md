@@ -40,13 +40,18 @@
   - 校验器实现蓝本见该文档 §10（四层校验 + 双检 + MiaCode slide_data.json 白名单与 SimaiParserSpec 回归用例借鉴）；
   - 原始报告：`docs/research/parser-source-analysis.md`、`docs/research/miacode-vm-research.md`。
 
-## 设想的技术路线（草案，待 Phase 0 完成后细化）
+## 技术路线（2026-09-10 定稿，详见 `docs/audio-analysis.md`）
 
-1. **音频分析**：BPM/节拍检测、onset 检测、结构分段（intro/verse/chorus）、能量曲线
-   （候选工具：librosa / essentia / madmom / basic-pitch）
-2. **谱面生成**：基于音频分析结果生成 note 序列与 SLIDE 轨迹（LLM 生成 or 结构化规则生成，待调研决定）
-3. **语法与可玩性校验**：内置 simai 校验器 + 手序/可及性启发式规则，校验不通过则自动迭代修复
-4. **输出**：组装为合法 `maidata.txt`
+**路线决策**：特征分析先行、生成器后置——不采用"全频谱直接进 Transformer"的端到端路线。四层管线：
+
+1. **L1 节拍层**（beat_this，MIT）：BPM/拍点/下拍 → 谱面时间轴；用户提供的 BPM/offset 为最高优先级覆盖
+2. **L2 音轨层**（Demucs htdemucs_ft + basic-pitch，MIT/Apache）：鼓/人声/贝斯/其他 stems 分离 → 各 stem onset 流 = 踩音候选池
+3. **L3 结构层**（all-in-one + FMP/libfmp SSM，MIT/ISC）：段落分段（含 chorus 标签）+ 重复段验证副歌 + librosa 强度曲线/高潮定位
+4. **L4 规划层**：结构 × 强度 × 音轨 → 逐段踩音计划（charting_plan.json），规则来自 `.agent/knowledge/` 001-016；生成端只消费结构化特征（LLM 不接触原始音频）
+5. **语法与可玩性校验**（`docs/simai-error-checking.md` §10）：四层校验 + SimaiSharp/MajdataEdit/MiaCode 三检，不通过自动迭代修复
+6. **输出**：合法 `maidata.txt`（零报错安全子集，`docs/simai-syntax.md` §6）
+
+工具选型红线：默认依赖仅 MIT/Apache-2.0/ISC/BSD；AGPL/GPL/CC BY-NC 权重不进默认管线（详见 `docs/audio-analysis.md` §7）。
 
 ## 工作准则（coding agent 必须遵守）
 
