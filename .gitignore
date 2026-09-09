@@ -35,3 +35,7 @@ node_modules/
 # 说明见 resource/README.md
 resource/*.pdf
 resource/*.txt
+
+# 官方谱面数据（抓取自 mai-notes.com，版权归 SEGA/原曲版权方，严禁入库）
+# 仅作本机研究参考
+resource/official-chart/
