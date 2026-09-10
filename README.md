@@ -62,6 +62,19 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 
 > 更多面向开发者的说明见 [AGENT.md](AGENT.md)。
 
+## 第三方材料与致谢
+
+- 本仓库**不再分发**任何第三方代码、官方谱面数据或歌曲音频：
+  - 官方谱面数据（抓取自 mai-notes.com）与本地预览环境仅存于本机 `resource/`，已被 `.gitignore` 排除，版权归 **SEGA / 原曲版权方**；
+  - 用户提供的参考资料（如 MMFC《MAIMAI 谱面创作基础学 长篇指南》PDF）同样不入库，仅在本机阅读与消化。
+- `docs/` 与 `docs/research/` 中的内容是对**公开资料**（simai 官方 wiki、社区解析器源码、中文社区教程）与**用户提供资料**的**归纳与引用**，来源链接均随文标注；
+  未复制第三方源码或许可证不明的大段原文。若需引用本项目对上述资料的整理结论，请自行核对原始来源。
+- 本项目与 **SEGA**、maimai（舞萌 DX）官方无任何关联；「maimai」「舞萌」等名称与相关素材的权利归其各自所有者。
+
 ## 许可证
 
-待定（License: TBD）
+[MIT](LICENSE) © 2026 SakuyaInazaki
+
+- 覆盖本仓库全部入库内容：代码、`docs/`、`docs/research/`、`.agent/knowledge/`、`.agent/notes/`。
+- 依赖工具与模型的许可证另有约束：默认管线只采用 **MIT / Apache-2.0 / ISC / BSD** 类，
+  AGPL/GPL 与非商用（CC BY-NC）权重不进默认管线（见 `AGENT.md` 技术路线、`docs/audio-analysis.md` §7）。
