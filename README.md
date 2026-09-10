@@ -75,6 +75,3 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 
 [MIT](LICENSE) © 2026 SakuyaInazaki
 
-- 覆盖本仓库全部入库内容：代码、`docs/`、`docs/research/`、`.agent/knowledge/`、`.agent/notes/`。
-- 依赖工具与模型的许可证另有约束：默认管线只采用 **MIT / Apache-2.0 / ISC / BSD** 类，
-  AGPL/GPL 与非商用（CC BY-NC）权重不进默认管线（见 `AGENT.md` 技术路线、`docs/audio-analysis.md` §7）。
