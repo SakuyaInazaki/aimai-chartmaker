@@ -1,0 +1,31 @@
+# tools/audio_analysis 依赖清单
+# 环境：macOS (Apple Silicon) + /opt/homebrew/bin/python3.12，仓库根建 .venv（已 gitignore）
+#   /opt/homebrew/bin/python3.12 -m venv .venv
+#   .venv/bin/pip install -r tools/audio_analysis/requirements.txt
+# 另需系统级 ffmpeg/ffprobe（/opt/homebrew/bin/ffmpeg，brew install ffmpeg）
+
+# --- 必需 ---
+numpy>=2.0            # 实测 2.5.3
+scipy>=1.13           # 实测 1.18.1（中值/高斯滤波、层次聚类）
+librosa>=0.11         # 实测 1.0.0（onset / chroma / MFCC / RMS / 质心）
+soundfile>=0.12       # 实测 0.14.0
+matplotlib>=3.8       # 实测 3.11.1
+pyloudnorm>=0.1       # 实测 0.2.0（-14 LUFS 归一）
+scikit-learn>=1.4     # 实测 1.9.1（librosa 依赖）
+torch>=2.2            # 实测 2.14.0（MPS 后端可用）
+torchaudio>=2.2       # 实测 2.11.0
+demucs>=4.0           # 实测 4.1.0（htdemucs / htdemucs_ft）
+
+# --- 可选：结构分段主线（装不上会自动退回自研 SSM）---
+# 二选一即可；本机两个都装上了，管线优先用 allin1_infer（可复用已跑好的 stems）。
+#   ⚠️ all-in-one-infer 会拖进 madmom-infer。madmom 的**模型权重是 CC BY-NC-SA**
+#      （见 docs/audio-analysis.md §7.2 许可证红线），若本项目要按 MIT 对外发布，
+#      需确认实际推理是否用到了 madmom 的 NC 权重，或改走纯 SSM 退路（--no-allin1）。
+all-in-one-infer>=3.1  # 实测 3.1.0，提供模块 allin1_infer
+# allin1>=1.1          # 官方版；需要真 madmom，本机未装 madmom 故不可用
+
+# --- 可选：人声旋律 note 事件（本机装不上，见 README「装包失败清单」）---
+# basic-pitch[onnx]    # pip resolution-too-deep，未安装；已用 vocals stem onset 代替
+
+# --- 测试 ---
+pytest>=8             # 实测 9.1.1
