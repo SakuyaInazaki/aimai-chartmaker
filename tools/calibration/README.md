@@ -8,7 +8,8 @@
 - **官方谱师这一段实际踩了哪条音轨**？`stemplan.py` 的规则表对不对？
 - 官方谱的结尾是尾杀还是渐弱？
 
-**结论全部写在 `docs/research/audio-chart-calibration.md`**，本 README 只讲怎么跑。
+**结论全部写在 `docs/research/audio-chart-calibration-n40.md`**（n=40，取代 n=8 的
+`audio-chart-calibration.md`），本 README 只讲怎么跑。
 
 ## 模块
 
@@ -18,6 +19,7 @@
 | `stemhit.py` | 官方 note 时间 × stem onset 匹配：命中率 / 精确率 / **随机基线 lift** / 全局相位扫描 φ\* |
 | `weights.py` | 五项 Z 特征 → 密度的 NNLS / 岭回归 + **留一曲交叉验证** + 手写预设对照 |
 | `ending.py` | 结尾形态判据（尾杀 / 渐弱 / 其他）与敏感性 |
+| `strata.py` | **（n=40 新增）** 曲目人声画像与分层汇总、精确符号检验、换权重的三条判据、单/双阈值扫描（Youden/AUC）、v0.2 单值规则表复刻、切轨模型一致率表 |
 | `loader.py` | 从 `out/calib/<曲名>/` 装载音频侧与谱面侧（重跑 onset，不重跑 Demucs） |
 | `cli.py` | 命令行入口 |
 
@@ -37,15 +39,21 @@ python -m tools.audio_analysis \
 ```bash
 python -m tools.calibration \
   --calib-dir out/calib \
-  --csv docs/research/data/audio-chart-calibration-summary.csv \
-  --metrics <scratchpad>/metrics.json \
-  --plots   <scratchpad>            # 逐曲 <曲名>-overlay.png
+  --csv docs/research/data/audio-chart-calibration-n40-summary.csv \
+  --metrics <scratchpad>/metrics40.json \
+  --plots   <scratchpad>            # 逐曲 <曲名>-overlay.png + summary.png（分布与分层箱线图）
 # 可选：--tol-ms 30（切轨匹配容差）--ridge-alpha 1.0 --skip-corpus（跳过 388 谱结尾统计）
 ```
 
+**变速曲的前置处理（n=40 新增）**：`Grid` 只支持"在小节线上换 BPM"。变速点落在小节
+**中间**的曲子（40 首里有 2 首），要先用谱面侧解析器的 `bpm_events`（拍位 → BPM）
+算出每个谱面小节的真实时长、反解成**该小节的等效 BPM**，再逐小节喂给 `--bpm-changes`。
+这样小节边界能精确对齐（实测 40/40 首误差 0.000 ms），代价是那一两个小节**内部**的
+分音判定不可信。做法见报告 n40 §1.2 与 R10。
+
 依赖：仓库根 `.venv`（python3.12）；用到 numpy / scipy / librosa / matplotlib，
 以及 `tools/audio_analysis` 与 `tools/chart_analysis` 两个包。
-测试：`python -m pytest tests/test_calibration.py -q`（41 用例，全合成数据）。
+测试：`python -m pytest tests/test_calibration.py -q`（**54 用例**，全合成数据）。
 
 ## 口径说明（引用数字前必读）
 

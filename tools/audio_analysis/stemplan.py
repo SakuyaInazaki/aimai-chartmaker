@@ -1,19 +1,21 @@
-"""踩音规划：**骨架轨 + 点缀轨**（v0.3；替换 v0.2 的单值 `primary_stem`）。
+"""踩音规划：**骨架轨 + 点缀轨**（v0.3 换模型；**v0.4 按 n=40 换人声主导判据**）。
 
-## 为什么换模型（v0.3 的核心改动）
+## 为什么换模型（v0.3 的核心改动，v0.4 已被 n=40 确认换对了方向）
 
-v0.2 把"主踩音轨"做成**一段一条轨**的单值。8 首官方音频 × 官方谱的配对标定
-（`docs/research/audio-chart-calibration.md` §5）把这个模型证伪了：
+v0.2 把"主踩音轨"做成**一段一条轨**的单值。官方音频 × 官方谱的配对标定
+（`docs/research/audio-chart-calibration-n40.md` §5，n=40；旧 n=8 报告见
+`audio-chart-calibration.md`）把这个模型证伪了：
 
-| 实测（n=8，代理判据） | 数字 |
-|---|---|
-| 官方 note 落在 `drums` onset 上（recall） | **0.607** |
-| **不**落在 drums 上 | **36.2%** |
-| 只落在 drums 上 | 28.1% |
-| 只落在 vocals 上 | **3.2%** |
-| 什么 stem 都不落（谱师自由发挥 / 装饰 / onset 漏检） | **18.6%** |
-| 逐段"最高命中轨" | drums 70 段 / other 10 / vocals 3 / bass 2（共 85） |
-| v0.2 规则表与"实测最高命中轨"的一致率 | **64.7%**，而"永远答 drums"是 **82.4%** |
+| 实测（代理判据） | n=8 | **n=40** |
+|---|---|---|
+| 官方 note 落在 `drums` onset 上（recall） | 0.607 | **0.639** |
+| **不**落在 drums 上 | 36.2% | **34.3%** |
+| 只落在 drums 上 | 28.1% | **30.4%** |
+| 只落在 vocals 上 | 3.2% | **3.5%** |
+| 什么 stem 都不落（谱师自由发挥 / 装饰 / onset 漏检） | 18.6% | **16.8%** |
+| 逐段"最高命中轨" | 85 段：drums 70 / other 10 / vocals 3 / bass 2 | **378 段：drums 319 / other 43 / vocals 9 / bass 7** |
+| **本模块（骨架轨）与实测最高命中轨的一致率** | 未测 | **85.2%（top-2 97.9%）**，**首次超过常数基线 84.4%** |
+| v0.2 单值规则表的一致率 | **64.7%**（当时常数基线 82.4%，输） | **62.4%**（n=40 复刻，仍输给 84.4%） |
 
 → 官方谱的真实形态是 **"鼓骨架 + 大量非鼓的填充与装饰"**，不存在"整段切到某一条
 非鼓轨"。所以本模块输出：
@@ -23,26 +25,26 @@ v0.2 把"主踩音轨"做成**一段一条轨**的单值。8 首官方音频 × 
 - **`accent`（点缀轨）**：`vocals` / `other` / `bass` 的有序列表，表示"骨架之外该往哪
   找填充与重音"；
 - **`share`（估计占比）**：粗估各轨承担的踩音比例，含一个固定的 `free` 残差
-  （= 标定实测 18.6% 什么都不落的那部分，留给谱师自由发挥）；
-- **`evidence`（依据）**：纯音频特征的数字（onset 密度 / 落格率 / voiced_ratio）。
+  （= 标定实测"什么都不落"的那部分：n=8 18.6% / n=40 16.8%，留给谱师自由发挥）；
+- **`evidence`（依据）**：纯音频特征的数字（onset 密度 / 落格率 / share_vocals / voiced_ratio）。
 
 ## 推理期没有谱面 —— 判据必须是纯音频特征
 
 **标定报告里的命中率/lift 只是规则的设计依据，不是运行时输入。**
 本模块在推理期只能看到 `features.py` 的逐小节音频特征表；下面每条规则的注释里
-写着"实测 ××"的地方，都是**设计依据**（来自 8 首配对数据），代码里用来判断的
+写着"实测 ××"的地方，都是**设计依据**（来自 40 首配对数据），代码里用来判断的
 一律是 `n_onset_*` / `grid_fit_bar_*` / `voiced_ratio` / `share_*` / `riff_sim_*`。
 
-## 规则表（v0.3；出处 MMFC 5.4 + 标定报告 §5.5 的 C1–C5 裁定）
+## 规则表（v0.4；出处 MMFC 5.4 + 标定报告的 C1–C5 裁定，n=40 复验）
 
 | # | 段落 | 骨架 | 点缀 | 相对 v0.2 的变化 |
 |---|------|------|------|------------------|
 | 1 | `intro` | 匹配倾向最高轨（默认 drums） | 次高倾向轨 | 判据从**能量占比**改为 **onset 匹配倾向/落格率**（C3：intro 的最高 lift 是 `other` 5.08 而非 drums 4.39，能量口径选错了轨） |
 | 2 | `verse` | `drums` | `other` ＞ `vocals`（小节尾） | 不变（实测 verse 的 other lift 3.49 最高） |
 | 3 | `pre_chorus` | `drums` | `other`，**最后 1–2 小节 `vocals`** | 不变 |
-| 4 | `chorus`/`final_chorus` | **`drums`** | 人声主导曲目 → `vocals` 为主；否则 `vocals` 只作重音点缀 | **条件触发**（C1）：14 个副歌段只有 2 段人声命中最高；且 C1 本身**存疑，待人工听审** |
-| 5 | `interlude` | `drums` | **有人声采样时 `vocals` 优先** | **加强**（C4：interlude 的 vocals precision 0.715 / lift 3.18 均为该类型最高，是唯一被正面支持的规则） |
-| 6 | 休息段 / `quiet_chorus` | `drums` | 非鼓里倾向最高者 | **标存疑**（C5：13 段样本，一致率 0.62，数据不支持也不反对） |
+| 4 | `chorus`/`final_chorus` | **`drums`** | 人声主导曲目 → `vocals` 为主；否则 `vocals` 只作重音点缀 | **条件触发**（C1）；**v0.4 换判据为 `share_vocals ≥ 0.14`**。n=40：88 个副歌段只有 **4 段**人声命中最高，**限定在人声曲上也只有 4/66**；但 C1 本身**存疑，待人工听审** |
+| 5 | `interlude` | `drums` | **有人声采样时 `vocals` 优先** | 规则成立（C4），但 **v0.4 修正表述**：n=40 的 interlude vocals **recall 0.075 是全表最低**、**precision 0.673 是全表最高** → 正确说法是"间奏里的人声采样**稀少但一旦出现几乎必被采用**"，不是"间奏该踩人声" |
+| 6 | 休息段 / `quiet_chorus` | `drums` | 非鼓里倾向最高者 | **v0.4 可以定论了**（C5）：n=40 有 63 段，`quiet_chorus` 的 drums recall **0.666 为全表最高** → 落ちサビ**仍以鼓为骨架**，点缀轨可换、骨架不换 |
 | 7 | 第 N 次副歌 | 与 `repeat_of` 同 | 同 | 不变（`upgrade` 置位，靠配置升级不靠加密） |
 | 8 | `outro` | 与 `intro` 同 | 与 `intro` 同 | 不变 |
 
@@ -54,7 +56,16 @@ v0.2 把"主踩音轨"做成**一段一条轨**的单值。8 首官方音频 × 
 ⚠️ C1（副歌全踩人声）在标定里被降级为「条件性 + **存疑**」：ground truth 是
 "官方 note 是否落在 Demucs vocals 轨的 librosa onset ±30 ms 内"这个**代理**，
 而人声 onset 检测本身是全管线最弱的一环（vocals 轨混 lead synth、鼓与人声重合
-不可区分）。**待人工听审复核**。
+不可区分）。**待人工听审复核。**
+**n=40 找到了这个代理的明确失败模式**：器乐曲《超絶！Superlative》的 vocals 轨是纯
+lead synth 泄漏（能量占比 0.003），却拿到 vocals recall **0.339** —— **代理会凭空
+制造"谱师踩了人声"**。所以 n=40 虽然把 C1 按得更死（4/88），**仍然只能降级不能推翻**。
+
+⚠️ **`voiced_ratio` 在本模块里已不再用于"有没有人声"的判断**（v0.4）：
+它是相对 dB 阈值，vocals 轨近乎静音时底噪也会超阈——《超絶！Superlative》的
+`voiced_ratio` 是 **1.000**。40 首上它把 **10/12 首器乐曲判成人声曲**。
+需要"有没有人声"时一律用 `share_vocals`（规则 5 的采样判据仍用 `voiced_ratio`
+配合 onset 数，属已知遗留，见报告 R8）。
 """
 
 from __future__ import annotations
@@ -70,17 +81,32 @@ MIN_ONSETS = 2
 MIN_GRID_FIT = 0.5
 SINGLE_TRACK_WARN_SEC = 90.0
 
-# 标定报告 §5.2：18.6% 的官方 note 不落在任何 stem 的 onset 上
-# （谱师自由发挥 / 装饰音 / onset 漏检，本报告无法区分三者）。
+# 官方 note 里"不落在任何 stem 的 onset 上"的比例
+# （谱师自由发挥 / 装饰音 / onset 漏检，标定无法区分三者）：n=8 18.6% / **n=40 16.8%**。
+# 差别没有实质意义，常数不动。
 FREE_PLAY_SHARE = 0.19
-# 人声主导判据（C1 条件触发）：两条**同时**成立才认为这段是「人声主导」。
-# ⚠️ **阈值是在 n=8 上分出来的，属存疑**：8 首里 `vocals/drums` onset 密度比在
-#    幻想のサテライト（标定里唯一"副歌踩人声"的正例）的三段副歌上是 0.68/0.72/0.87，
-#    其余 7 首全部 ≤ 0.64；voiced_ratio 再挡掉 Mare Maris（比值 0.64 但 voiced 0.07）。
-#    取 0.65 只是让规则在唯一已知正例上能触发，**没有独立样本验证过**。
-#    另注：人声 onset 检测系统性漏检（比鼓保守），所以判据不是"≥1.0"。
-VOCAL_LED_VOICED = 0.45          # 段内 voiced_ratio 均值
-VOCAL_LED_ONSET_RATIO = 0.65     # vocals onset 密度 / drums onset 密度
+# 人声主导判据（C1 条件触发）。
+# 🧪 **v0.4（n=40 复验，2026-09-11 第二轮）：判据从「voiced_ratio ∧ onset 比」换成
+#    单条「vocals 轨能量占比 `share_vocals`」。**
+#    依据 `docs/research/audio-chart-calibration-n40.md` §5.4，在 357 个段落上以
+#    "段内 vocals lift > drums lift" 为标签扫阈值：
+#      | 判据 | 最优阈值 | Youden J | AUC |
+#      |---|---|---|---|
+#      | 旧 `voiced_ratio` | 0.918 | 0.217 | 0.635 |
+#      | 旧 `n_onset_vocals/n_onset_drums` | 0.129 | 0.174 | 0.586 |
+#      | **`share_vocals`** | **0.142** | **0.243** | **0.644** |
+#      | 旧的固定 0.45/0.65 组合 | — | **0.053** | — |
+#    旧组合在 40 首上几乎不工作：只在 42/357 段点亮，其中仅 16 段是对的
+#    （TPR 0.155、FPR 0.102）—— 0.65 这个 onset 比阈值比实测最优高了 5 倍。
+# ⚠️ 换判据的另一个硬理由：**`voiced_ratio` 分不开人声曲与器乐曲**。
+#    器乐曲《超絶！Superlative》的 `voiced_ratio` 是 **1.000**（vocals 轨近乎静音时，
+#    相对 dB 的 VAD 把底噪全判成有人声），而它的 `share_vocals` 只有 **0.003**。
+# ⚠️ **仍然存疑**：AUC 0.644、precision 0.40 —— 这是个**弱**预测器，
+#    只配用来给点缀轨排序，**不得当硬约束**；且标签本身仍是代理（见 §5 口径）。
+VOCAL_LED_SHARE = 0.14           # 段内 share_vocals 均值（n=40 Youden 最优 0.142）
+# 旧判据保留为对照常数（不再参与判定），便于回溯与 A/B
+LEGACY_VOCAL_LED_VOICED = 0.45
+LEGACY_VOCAL_LED_ONSET_RATIO = 0.65
 # 间奏人声采样（C4）：人声进出、密度不高
 SAMPLE_VOICED_RANGE = (0.12, 0.55)
 MAX_ACCENTS = 2
@@ -143,12 +169,18 @@ def _pick_skeleton(st: dict) -> tuple[str, str]:
 
 
 def _vocal_led(st: dict) -> tuple[bool, str]:
-    """C1 的条件触发判据（纯音频）：人声主导 = voiced 高 **且** 人声 onset 密度 ≳ 鼓。"""
+    """C1 的条件触发判据（纯音频，v0.4）：人声主导 = vocals 轨能量占比够高。
+
+    判据从 v0.3 的「`voiced_ratio` ≥ 0.45 且 vocals/drums onset 比 ≥ 0.65」换成单条
+    `share_vocals ≥ 0.14`（n=40 扫阈值的 Youden 最优，见 `VOCAL_LED_SHARE` 注释）。
+    """
     v, d = st["dens"]["vocals"], st["dens"]["drums"]
     ratio = v / d if d > 1e-9 else (float("inf") if v > 0 else 0.0)
-    led = st["voiced"] >= VOCAL_LED_VOICED and ratio >= VOCAL_LED_ONSET_RATIO
-    txt = (f"voiced={st['voiced']:.2f}、vocals/drums onset 密度比={ratio:.2f}"
-           f"（判据：≥{VOCAL_LED_VOICED} 且 ≥{VOCAL_LED_ONSET_RATIO}）")
+    share = st["share"].get("vocals", 0.0)
+    led = share >= VOCAL_LED_SHARE
+    txt = (f"share_vocals={share:.3f}（判据：≥{VOCAL_LED_SHARE}，n=40 Youden 最优；"
+           f"AUC 0.644 属**弱**预测器）；对照：voiced={st['voiced']:.2f}、"
+           f"vocals/drums onset 密度比={ratio:.2f}")
     return led, txt
 
 

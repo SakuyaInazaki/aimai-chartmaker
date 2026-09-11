@@ -341,3 +341,148 @@ def test_fit_density_floor_recovers_synthetic_floor():
 def test_fit_density_floor_empty_input():
     out = cp.fit_density_floor([])
     assert np.isnan(out["floor"]) and out["curve"] == []
+
+
+# ---------------------------------------------------------------------------
+# strata.py（n=40 扩样时新增的分层统计与阈值扫描）
+# ---------------------------------------------------------------------------
+
+from tools.calibration import strata as strata_mod      # noqa: E402
+
+
+def test_level_band_and_bpm_band_boundaries():
+    assert strata_mod.level_band(13.0) == "13.0-13.2"
+    assert strata_mod.level_band(13.2) == "13.0-13.2"
+    assert strata_mod.level_band(13.3) == "13.3-13.7"
+    assert strata_mod.level_band(13.9) == "13.8-14.2"
+    assert strata_mod.level_band(14.5) == "14.3-14.5"
+    assert strata_mod.bpm_band(128) == "<150"
+    assert strata_mod.bpm_band(150) == "150-179"
+    assert strata_mod.bpm_band(185) == "180-199"
+    assert strata_mod.bpm_band(230) == ">=200"
+
+
+def test_vocal_profile_classifies_by_share_vocals():
+    hi = {"_features": {"voiced": [0.6, 0.7, 0.5]}, "n_slots": 100,
+          "audio_profile": {"share_vocals_mean": 0.25},
+          "global_stem": {"vocals": {"n_onsets": 200}, "drums": {"n_onsets": 400}}}
+    lo = {"_features": {"voiced": [0.02, 0.0, 0.05]}, "n_slots": 100,
+          "audio_profile": {"share_vocals_mean": 0.01},
+          "global_stem": {"vocals": {"n_onsets": 10}, "drums": {"n_onsets": 500}}}
+    a, b = strata_mod.vocal_profile(hi), strata_mod.vocal_profile(lo)
+    assert a["kind"] == "vocal" and b["kind"] == "instrumental"
+    assert a["vocals_over_drums"] == pytest.approx(0.5)
+    assert a["vocal_ceiling"] == pytest.approx(2.0)
+
+
+def test_vocal_profile_share_beats_broken_vad():
+    """n=40 的真实故障形态：vocals 轨近乎静音，VAD 却报 voiced_ratio=1.0。"""
+    broken = {"_features": {"voiced": [1.0, 1.0, 1.0]}, "n_slots": 100,
+              "audio_profile": {"share_vocals_mean": 0.003},
+              "global_stem": {"vocals": {"n_onsets": 30}, "drums": {"n_onsets": 500}}}
+    p = strata_mod.vocal_profile(broken)
+    assert p["kind"] == "instrumental"          # 能量占比判对
+    assert p["kind_by_voiced"] == "vocal"       # VAD 判错（对照列）
+
+
+def test_stratify_groups_and_aggregates():
+    items = [{"g": "a", "v": 0.5}, {"g": "a", "v": 0.5}, {"g": "b", "v": 0.1},
+             {"g": "b", "v": None}, {"g": None, "v": 0.9}]
+    out = strata_mod.stratify(items, "g", "v")
+    assert out["a"]["n"] == 2 and out["a"]["value"] == pytest.approx(0.5, abs=1e-6)
+    assert out["b"]["n"] == 1
+    assert set(out) == {"a", "b"}
+
+
+def test_boxplot_groups_returns_sorted_raw_values():
+    items = [{"g": "a", "v": 0.3}, {"g": "a", "v": 0.1}, {"g": "b", "v": 0.2}]
+    out = strata_mod.boxplot_groups(items, "g", "v")
+    assert out["a"] == [0.1, 0.3] and out["b"] == [0.2]
+
+
+def test_sign_test_p_known_values():
+    assert strata_mod.sign_test_p(5, 8) == pytest.approx(0.7266, abs=1e-3)
+    assert strata_mod.sign_test_p(8, 8) == pytest.approx(0.0078, abs=1e-3)
+    assert strata_mod.sign_test_p(30, 40) == pytest.approx(0.0022, abs=1e-3)
+    assert np.isnan(strata_mod.sign_test_p(0, 0))
+
+
+def test_weight_switch_verdict_requires_all_three_criteria():
+    # 提升够大、胜出比够高、p 够小 → 换
+    fit = [0.6] * 30 + [0.3] * 10
+    init = [0.5] * 30 + [0.4] * 10
+    v = strata_mod.weight_switch_verdict(fit, init)
+    assert v["n_folds"] == 40 and v["n_wins"] == 30
+    assert v["switch"] is True
+    # 只差一点点 → 不换（gain 判据挂掉）
+    v2 = strata_mod.weight_switch_verdict([0.51] * 40, [0.50] * 40)
+    assert v2["switch"] is False
+    assert v2["criteria"]["gain>=0.03"] is False
+
+
+def test_sweep_threshold_finds_perfect_split():
+    scores = [0.1, 0.2, 0.3, 0.8, 0.9, 1.0]
+    labels = [False, False, False, True, True, True]
+    out = strata_mod.sweep_threshold(scores, labels)
+    assert out["best"]["youden"] == pytest.approx(1.0)
+    assert 0.3 < out["best"]["threshold"] < 0.8
+    assert out["auc"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_sweep_threshold_degenerate_labels():
+    out = strata_mod.sweep_threshold([1.0, 2.0], [True, True])
+    assert out["best"] is None and out["auc"] is None
+
+
+def test_sweep_two_thresholds_and_fixed_eval():
+    a = [0.1, 0.9, 0.9, 0.2]
+    b = [0.9, 0.9, 0.1, 0.1]
+    y = [False, True, False, False]
+    out = strata_mod.sweep_two_thresholds(a, b, y)
+    assert out["best"]["tp"] == 1 and out["best"]["fp"] == 0
+    fixed = strata_mod.evaluate_fixed_two(a, b, y, 0.45, 0.65)
+    assert fixed["tp"] == 1 and fixed["fp"] == 0 and fixed["tn"] == 3
+
+
+def test_agreement_table_counts_models_separately():
+    rows = [
+        {"plan_primary": "drum", "plan_v02": "vocal", "best_stem": "drums",
+         "second_stem": "other", "accent_stems": ["hook"]},
+        {"plan_primary": "drum", "plan_v02": "vocal", "best_stem": "vocals",
+         "second_stem": "drums", "accent_stems": ["vocal"]},
+    ]
+    out = strata_mod.agreement_table(rows)
+    assert out["n"] == 2
+    assert out["skeleton_top1"] == pytest.approx(0.5)
+    assert out["v02_rule_top1"] == pytest.approx(0.5)
+    assert out["constant_drums"] == pytest.approx(0.5)
+    assert out["accent_hits_second"] == pytest.approx(0.5)
+    assert out["truth_dist"]["drums"] == 1
+
+
+def test_plan_v02_chorus_rule_is_vocals_when_usable():
+    n = 8
+    bf = {"share_drums": np.full(n, 0.5), "share_bass": np.full(n, 0.2),
+          "share_other": np.full(n, 0.2), "share_vocals": np.full(n, 0.1),
+          "n_onset_drums": np.full(n, 10.0), "n_onset_bass": np.full(n, 10.0),
+          "n_onset_other": np.full(n, 10.0), "n_onset_vocals": np.full(n, 10.0),
+          "grid_fit_bar_drums": np.full(n, 0.9), "grid_fit_bar_bass": np.full(n, 0.9),
+          "grid_fit_bar_other": np.full(n, 0.9), "grid_fit_bar_vocals": np.full(n, 0.9),
+          "voiced_ratio": np.full(n, 0.6)}
+    segs = [{"start_bar": 1, "end_bar": 8, "function": "chorus"}]
+    assert strata_mod.plan_v02_primary(segs, bf) == ["vocal"]
+    # 人声轨不可用（onset 太少）→ v0.2 的降级规则把它退回 drums
+    bf2 = dict(bf, n_onset_vocals=np.zeros(n))
+    assert strata_mod.plan_v02_primary(segs, bf2) == ["drum"]
+
+
+def test_plan_v02_intro_uses_energy_share():
+    n = 8
+    bf = {"share_drums": np.full(n, 0.1), "share_bass": np.full(n, 0.1),
+          "share_other": np.full(n, 0.7), "share_vocals": np.full(n, 0.1),
+          "voiced_ratio": np.zeros(n)}
+    for st in ("drums", "bass", "other", "vocals"):
+        bf[f"n_onset_{st}"] = np.full(n, 10.0)
+        bf[f"grid_fit_bar_{st}"] = np.full(n, 0.9)
+    segs = [{"start_bar": 1, "end_bar": 8, "function": "intro"}]
+    assert strata_mod.plan_v02_primary(segs, bf) == ["hook"]

@@ -374,12 +374,24 @@ def test_zscore_and_robust_unit():
     assert u.min() == 0.0 and u.max() == 1.0
 
 
-def test_fusion_weights_match_research_v2():
+def test_fusion_weights_are_the_n40_calibrated_values():
+    """v0.4：默认权重换成 40 首配对标定的 LOSO 值（报告 n40 §3）。"""
     w = intensity.DEFAULT_FUSION_WEIGHTS
+    assert w == {"loudness": 0.00, "onset": 0.19, "drums": 0.07,
+                 "voiced": 0.00, "flux": 0.74}
+    assert sum(w.values()) == pytest.approx(1.0)
+    assert "centroid" not in w          # 质心已移出融合项（只留在 drop 票）
+    # `flux` 是标定里的最强单项，必须是最大权重；`voiced` 被 NNLS 判为 0
+    assert max(w, key=w.get) == "flux"
+    assert w["voiced"] == 0.0
+
+
+def test_legacy_fusion_weights_kept_for_rollback():
+    """旧初值保留为对照/回退（`--fusion-weights` 可取回）。"""
+    w = intensity.LEGACY_FUSION_WEIGHTS
     assert w == {"loudness": 0.25, "onset": 0.30, "drums": 0.20,
                  "voiced": 0.15, "flux": 0.10}
     assert sum(w.values()) == pytest.approx(1.0)
-    assert "centroid" not in w          # 质心已移出融合项（只留在 drop 票）
 
 
 def test_vote_weights_are_five():
@@ -444,7 +456,7 @@ def test_section_floor_is_a_parameter_not_a_constant():
     dn_default, _ = intensity.density_map(I, intensity.SECTION_DENSITY_FLOOR, 9.15)
     dn_calib, _ = intensity.density_map(I, intensity.CALIBRATED_SECTION_FLOOR, 9.15)
     assert dn_default[0] == pytest.approx(0.60)
-    assert dn_calib[0] == pytest.approx(0.125)   # n=8 实测最优，仅作可选值
+    assert dn_calib[0] == pytest.approx(0.365)   # n=40 池化最优（n=8 的 0.125 已被推翻）
     assert dn_default[1] == dn_calib[1] == pytest.approx(1.0)
 
 
@@ -620,7 +632,7 @@ def test_skeleton_defaults_to_drums():
 
 def test_chorus_vocal_accent_is_conditional():
     """C1：副歌踩人声只在**人声主导**时成立，否则人声只作点缀。"""
-    # (a) 人声主导：voiced 0.7、vocals onset 与 drums 同级
+    # (a) 人声主导：share_vocals 0.25 ≥ VOCAL_LED_SHARE（v0.4 判据）
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
     out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
     led = out[1]
@@ -628,10 +640,12 @@ def test_chorus_vocal_accent_is_conditional():
     assert led.accent_stems[0] == "vocal"
     assert "人声主导" in "".join(led.notes)
 
-    # (b) 非人声主导：voiced 低且人声 onset 稀疏 → 人声不再领衔
+    # (b) 非人声主导：v0.4 判据只看 vocals 轨能量占比，压到阈值以下即不领衔
     f = _stem_feats()
     f["voiced_ratio"] = np.full(32, 0.20)
     f["n_onset_vocals"] = np.full(32, 2.5)
+    f["share_vocals"] = np.full(32, 0.05)          # < VOCAL_LED_SHARE (0.14)
+    f["share_other"] = np.full(32, 0.45)
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
     out2, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
     assert out2[1].skeleton_stem == "drum"
