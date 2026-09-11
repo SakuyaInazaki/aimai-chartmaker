@@ -48,3 +48,6 @@ resource/player-preview/
 
 # 音频分析输出（stems/特征/图，可含版权音频衍生物，不入库）
 /out/
+
+# 用户提供的官方谱 zip（含版权音频与官方谱面），仅本机标定用，不入库
+/official-mp3/
