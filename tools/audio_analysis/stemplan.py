@@ -66,16 +66,86 @@ lead synth 泄漏（能量占比 0.003），却拿到 vocals recall **0.339** �
 `voiced_ratio` 是 **1.000**。40 首上它把 **10/12 首器乐曲判成人声曲**。
 需要"有没有人声"时一律用 `share_vocals`（规则 5 的采样判据仍用 `voiced_ratio`
 配合 onset 数，属已知遗留，见报告 R8）。
+
+## v0.5（2026-09-12）：候选轨从 4 条扩到 6 条
+
+用户指出"采样的话不能只有人声和鼓点两种"——官方谱大量踩合成器主旋律、钢琴、
+吉他 riff、采样音效，四路管线把它们全塞在 `other` 一路里，且能量 onset 抓不到
+长音 / 分解和弦 / legato 换音。v0.5 加两条派生轨：
+
+| 轨 | 来源 | 能当骨架？ | n=40 实测 lift |
+|---|---|---|---|
+| **`melody`** | `other` + `guitar` + `piano`（htdemucs_6s）的 **basic-pitch 有音高 note onset**（最高声部）合并 | **否** | **1.61**（全表最低） |
+| **`fx`** | `other` stem 的 **>4 kHz 瞬态**（风铃 / crash / 采样打击 / FX） | **否**（定义即点缀音） | **1.99**（recall 只有 0.043，precision 0.460） |
+| `piano` / `guitar` | htdemucs_6s 细分（能量 onset） | 否（细分轨，只进 JSON） | **2.44** / 1.79 |
+
+同时**人声活动判据换件**：`_seg_stats` 优先读 `vocal_pitched_ratio`
+（basic-pitch 有音高 note 的时间覆盖率），没有才回退能量 VAD `voiced_ratio`。
+⚠️ 阈值（`SAMPLE_VOICED_RANGE` 等）是照搬旧口径的**可解释初值，未标定**。
+
+**v0.5 标定（`docs/research/stem-refinement-n40.md`）改了两处**：
+① `melody` **退出骨架候选**（参选时骨架一致率 0.852 → 0.826，跌破常数基线 0.844）；
+② 排序量 `tendency` 乘上 **`TRACK_LIFT_PRIOR`**（实测 lift 归一到 drums=1）——
+纯密度口径会让 `melody` 霸占 276/379 段的第一点缀位，而它的 lift 全表最低。
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-# 逻辑轨名（与 tracks.TRACK_ORDER 一致）→ stem
-TRACK_OF_STEM = {"drums": "drum", "vocals": "vocal", "bass": "bass", "other": "hook"}
+# 逻辑轨名（与 tracks.TRACK_SOURCE 一致）→ stem / 派生流
+TRACK_OF_STEM = {"drums": "drum", "vocals": "vocal", "bass": "bass", "other": "hook",
+                 # v0.5 新增（派生流与六路细分）
+                 "melody": "melody", "fx": "fx", "guitar": "guitar", "piano": "piano"}
 STEM_OF_TRACK = {v: k for k, v in TRACK_OF_STEM.items()}
+#: v0.4 的候选轨集合（四路分离）
 STEMS = ("drums", "bass", "other", "vocals")
+#: **v0.5 的候选轨集合**：四路 + `piano`/`guitar`（六路细分）+ `melody`（有音高 note）
+#: + `fx`（>4 kHz 瞬态）。**四类轨的角色完全不同，见下面三张名单。**
+STEMS_V5 = ("drums", "bass", "other", "vocals", "piano", "guitar", "melody", "fx")
+
+#: **参与排序的点缀候选**（密度与 `other` 同量级、lift ≥ 1.79 的轨）。
+#: 🧪 v0.5 标定：`piano` 的 lift **2.44** 是全部非鼓轨里最高的、precision 0.563 全表第一
+#:    → 它**必须**进点缀候选；`guitar` 1.79 偏弱但量级正常，一并纳入。
+ACCENT_RANKED = ("other", "vocals", "bass", "piano", "guitar")
+
+#: **稀疏高精度轨**：不参与密度排序，只由专门规则触发（与 C4「间奏人声采样」同型）。
+#: 🧪 `fx`：recall 只有 0.043（全表最低）但 precision 0.460 / lift 1.99 ——
+#:    "稀少，但一旦出现几乎必被采用"。按密度排它永远排不上，必须单独给一条规则。
+ACCENT_SPARSE = ("fx",)
+
+#: **只进候选池、不进排序**的轨。
+#: 🧪 **v0.5 标定的硬结论**：`melody`（basic-pitch 有音高 note，最高声部）
+#:    recall 0.698 看着最高，但那是 43873 个候选撑出来的 —— lift 只有 **1.61**、
+#:    precision **0.338**，两项都是全表最差档。让它参与排序时 379 段里有 **232 段**
+#:    把它排成第一点缀，"第一点缀落在实测 lift 前三"从 **0.699 掉到 0.356**。
+#:    → 它留在 song sheet 的网格串里当**候选池**（长音/分解和弦/legato 换音只有它抓得到），
+#:    但**不得出现在 `accent_stems` 的前列**。
+CANDIDATE_ONLY = ("melody",)
+#: 允许当骨架的轨。
+#: 🧪 **v0.5 标定把 `melody` 从骨架候选里删掉了**（`docs/research/stem-refinement-n40.md` §8）：
+#:    让它参选时 379 段的骨架一致率从 **0.852 掉到 0.826**，跌破常数基线 0.844 ——
+#:    melody 的 lift 只有 1.61（全表最低档），它没有当律动底盘的资格。
+#: `fx` 也永远不是骨架：它是点缀音的定义。
+SKELETON_CANDIDATES = ("drums", "bass", "other", "vocals")
+
+#: **逐轨价值先验**（= n=40 实测 lift，逐曲按事件数加权，见 `stem-refinement-n40.md` §5）。
+#: 🧪 **为什么需要它**：`tendency = onset 密度 × 落格率` 是个**纯密度量**，
+#:    它系统性地高估稠密轨 —— `melody` 一首曲能吐上千个 note，按 tendency 排序时
+#:    379 段里有 **276 段**把它排成第一点缀，而它的 lift 只有 1.61
+#:    （官方真正踩的密度只比随机撒点高 61%），远不如 `piano` 2.44 / `other` 2.30。
+#:    lift 的定义本身就是"扣掉密度红利之后还剩多少信号"，所以用它当先验。
+#: ⚠️ 这是**曲库级常数**，不是逐段量：它只用来给候选排序，不进入任何硬判据。
+TRACK_LIFT_PRIOR = {
+    "drums": 2.73, "piano": 2.44, "other": 2.30, "vocals": 2.16,
+    "fx": 1.99, "bass": 1.93, "guitar": 1.79, "melody": 1.61,
+}
+_PRIOR_REF = TRACK_LIFT_PRIOR["drums"]
+
+
+def lift_prior(stem: str) -> float:
+    """该轨的价值先验（归一到 drums = 1.0）；未标定的轨按 1.0 处理。"""
+    return TRACK_LIFT_PRIOR.get(stem, _PRIOR_REF) / _PRIOR_REF
 
 MIN_ONSETS = 2
 MIN_GRID_FIT = 0.5
@@ -110,6 +180,9 @@ LEGACY_VOCAL_LED_ONSET_RATIO = 0.65
 # 间奏人声采样（C4）：人声进出、密度不高
 SAMPLE_VOICED_RANGE = (0.12, 0.55)
 MAX_ACCENTS = 2
+#: 稀疏高精度轨（`fx`）被点亮的门槛：段内每小节至少这么多个事件。
+#: ⚠️ **可解释初值，未标定**（0.5/小节 ≈ 每两小节一个点缀音）。
+SPARSE_ACCENT_MIN_PER_BAR = 0.5
 
 
 def _seg_slice(arr, s) -> np.ndarray:
@@ -122,12 +195,29 @@ def _mean(bar_features: dict[str, np.ndarray], s, key: str, default: float = 0.0
     return float(np.mean(seg)) if seg.size else float(default)
 
 
-def _seg_stats(bar_features: dict[str, np.ndarray], s) -> dict:
+def detect_stem_set(bar_features: dict[str, np.ndarray]) -> tuple[str, ...]:
+    """按逐小节特征表里实际出现的轨，决定这次用 v0.4 四轨还是 v0.5 六轨候选集。"""
+    have = {k for k in STEMS_V5 if f"n_onset_{k}" in bar_features}
+    if "melody" in have or "fx" in have:
+        return tuple(k for k in STEMS_V5 if k in have or k in STEMS)
+    return STEMS
+
+
+def _seg_stats(bar_features: dict[str, np.ndarray], s,
+               stem_set: tuple[str, ...] = STEMS) -> dict:
     """段内的纯音频特征汇总（推理期唯一可用的信息）。"""
-    st: dict = {"voiced": _mean(bar_features, s, "voiced_ratio"),
+    # 人声活动：v0.5 起优先用 basic-pitch 的**有音高 note 覆盖率**，
+    # 没有才回退到能量 VAD（后者是设计文档 §9-A.3 记录的坏探测器）。
+    has_pitched = "vocal_pitched_ratio" in bar_features
+    st: dict = {"voiced": _mean(bar_features, s,
+                                "vocal_pitched_ratio" if has_pitched else "voiced_ratio"),
+                "voiced_source": "vocal_pitched_ratio" if has_pitched else "voiced_ratio",
+                "voiced_vad": _mean(bar_features, s, "voiced_ratio"),
                 "riff_sim": _mean(bar_features, s, "riff_sim_4"),
-                "dens": {}, "fit": {}, "share": {}, "tendency": {}}
-    for stem in STEMS:
+                "stems": tuple(stem_set),
+                "dens": {}, "fit": {}, "share": {}, "tendency": {},
+                "tendency_raw": {}}
+    for stem in stem_set:
         dens = _mean(bar_features, s, f"n_onset_{stem}")
         fit = _seg_slice(bar_features.get(f"grid_fit_bar_{stem}",
                                           bar_features.get(f"grid_fit_{stem}",
@@ -136,15 +226,39 @@ def _seg_stats(bar_features: dict[str, np.ndarray], s) -> dict:
         st["dens"][stem] = dens
         st["fit"][stem] = fit
         st["share"][stem] = _mean(bar_features, s, f"share_{stem}")
-        # 「匹配倾向」= 该轨每小节能提供多少个**落得上格**的可踩音。
-        # 这是纯音频量，替代 v0.2 的能量占比 `share_s`（C3：能量口径选错轨）。
-        st["tendency"][stem] = dens * fit
+        # 「匹配倾向」= 该轨每小节能提供多少个**落得上格**的可踩音
+        #   × 该轨的**价值先验**（= n=40/v0.5 实测 lift，归一到 drums=1）。
+        # 纯密度口径替代了 v0.2 的能量占比（C3：能量口径选错轨），但它自己会
+        # 系统性高估稠密轨 —— v0.5 标定实测 melody 会霸占 276/379 段的第一点缀位，
+        # 而它的 lift 全表最低。乘先验就是把"密度红利"扣掉。
+        st["tendency_raw"][stem] = dens * fit
+        st["tendency"][stem] = dens * fit * lift_prior(stem)
     return st
 
 
-def _rank(st: dict, exclude=()) -> list[str]:
-    """按匹配倾向排序的 stem 列表（降序）。"""
-    cand = {k: v for k, v in st["tendency"].items() if k not in exclude}
+def _accent_pref(st: dict, prefs: tuple[str, ...]) -> list[str]:
+    """点缀候选：只保留本次轨集里存在的轨，按匹配倾向降序。
+
+    v0.5：`melody`（有音高 note 轨）进入 verse/pre_chorus 的候选。理由是
+    n=40 标定里 `other` 的 lift 在 verse（3.49）/`pre_chorus`（recall 0.431）两类
+    段落上最高，而 `other` 里真正被官方踩的多半是**有音高的 riff / 主旋律**，
+    能量 onset 只能抓到它的一部分。⚠️ **melody 的收益待标定**（报告 §4）。
+    """
+    have = [p for p in prefs if p in st["dens"] and p in ACCENT_RANKED]
+    return sorted(have, key=lambda k: st["tendency"].get(k, 0.0), reverse=True)
+
+
+def _rank(st: dict, exclude=(), ranked_only: bool = True) -> list[str]:
+    """按匹配倾向排序的 stem 列表（降序）。
+
+    `ranked_only=True`（默认）时只在**能参与排序**的轨里选：排除
+    `CANDIDATE_ONLY`（melody：密度虚高、lift 最低）与 `ACCENT_SPARSE`（fx：按密度永远排不上，
+    走专门规则）。骨架选择另有 `SKELETON_CANDIDATES` 把关。
+    """
+    drop = set(exclude)
+    if ranked_only:
+        drop |= set(CANDIDATE_ONLY) | set(ACCENT_SPARSE)
+    cand = {k: v for k, v in st["tendency"].items() if k not in drop}
     return sorted(cand, key=cand.get, reverse=True)
 
 
@@ -158,12 +272,12 @@ def _usable(st: dict, stem: str) -> tuple[bool, str]:
 
 
 def _pick_skeleton(st: dict) -> tuple[str, str]:
-    """骨架轨：默认 drums；不可用时换成倾向最高的可用轨。"""
+    """骨架轨：默认 drums；不可用时换成倾向最高的可用轨（`fx` 不参选）。"""
     ok, why = _usable(st, "drums")
     if ok:
         return "drums", ""
     for stem in _rank(st, exclude=("drums",)):
-        if _usable(st, stem)[0]:
+        if stem in SKELETON_CANDIDATES and _usable(st, stem)[0]:
             return stem, f"⚠️ 骨架降级：{why} → 改用 {stem}（匹配倾向最高的可用轨）"
     return "drums", f"⚠️ {why}，且无其他可用轨 → 仍按 drums 骨架处理（该段可踩音极少）"
 
@@ -208,18 +322,22 @@ def _estimate_share(st: dict, skeleton: str, accents: list[str]) -> dict:
 
 
 def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
-               duration_sec: float = 0.0) -> tuple[list, list[str]]:
+               duration_sec: float = 0.0,
+               stem_set: tuple[str, ...] | None = None) -> tuple[list, list[str]]:
     """给每段填 `skeleton_stem` / `accent_stems` / `accent_share` / 依据。
 
+    参数：
+        stem_set: 候选轨集合；缺省按 `bar_features` 自动判 v0.4 四轨 / v0.5 六轨。
     返回 `(segments, warnings)`。
     """
     warnings: list[str] = []
     by_span: dict[tuple[int, int], dict] = {}
     intro_plan: dict | None = None
+    stem_set = tuple(stem_set) if stem_set else detect_stem_set(bar_features)
 
     for s in segments:
         fn = s.function
-        st = _seg_stats(bar_features, s)
+        st = _seg_stats(bar_features, s, stem_set=stem_set)
         skeleton, degrade = _pick_skeleton(st)
         ranked_non_skel = _rank(st, exclude=(skeleton,))
         accents: list[str] = []
@@ -239,11 +357,13 @@ def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
                     "`other`(5.08) 而非 drums(4.39)，"
                     "「哪个响踩哪个」的能量口径会选错轨")
         elif fn == "verse":
-            accents = [a for a in ("other", "vocals") if _usable(st, a)[0]][:MAX_ACCENTS]
+            accents = [a for a in _accent_pref(st, ("piano", "other", "vocals"))
+                       if _usable(st, a)[0]][:MAX_ACCENTS]
             note = ("规则 2（MMFC 5.4-2）：主歌鼓骨架 + 器乐点缀，**每 4 小节的最后 1–2 拍**"
                     "混人声（实测 verse 的 other lift 3.49 为该类型最高）")
         elif fn == "pre_chorus":
-            accents = [a for a in ("other", "vocals") if _usable(st, a)[0]][:MAX_ACCENTS]
+            accents = [a for a in _accent_pref(st, ("piano", "other", "vocals"))
+                       if _usable(st, a)[0]][:MAX_ACCENTS]
             note = ("规则 3（MMFC 5.4-3）：段首鼓骨架 + 器乐点缀，**最后 1–2 小节把点缀"
                     "切到人声**为副歌铺垫；切轨点必须落在小节线")
         elif fn in ("chorus", "final_chorus"):
@@ -309,6 +429,7 @@ def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
             note += "；**upgrade**：配置升级（单星 → 双手星），不靠加密（知识 031「强度≠密度」）"
 
         # 点缀轨的可用性检查：器乐曲里「小节尾混人声」无声可混
+        accents = [a for a in accents if a != skeleton]     # 骨架不重复列进点缀
         kept, dropped = [], []
         for a in accents[:MAX_ACCENTS]:
             ok_a, why_a = _usable(st, a)
@@ -329,6 +450,19 @@ def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
         if degrade:
             note += "；" + degrade
 
+        # 稀疏高精度轨（`fx`）：不与密度排序竞争，单独按"这一段里有没有"判。
+        # 🧪 n=40/v0.5：`fx` recall 0.043（全表最低）但 precision 0.460、lift 1.99，
+        #    逐段看在 `final_chorus`(prec 0.596) 与 `interlude`(0.548) 最准 ——
+        #    与 C4「间奏人声采样」完全同型：**稀少，但一旦出现几乎必被采用**。
+        sparse = [k for k in ACCENT_SPARSE
+                  if st["dens"].get(k, 0.0) >= SPARSE_ACCENT_MIN_PER_BAR]
+        if sparse:
+            note += ("；**点缀音效**（`fx` = >4kHz 瞬态：风铃/crash/采样打击）"
+                     f"段内 {st['dens'].get('fx', 0.0):.1f} 个/小节 —— 实测 precision 0.460、"
+                     "lift 1.99，**稀少但一出现几乎必被官方采用**，重音处优先给它")
+        if getattr(s, "sparse_accents", None) is not None:
+            s.sparse_accents = [TRACK_OF_STEM.get(a, a) for a in sparse]
+
         s.skeleton_stem = TRACK_OF_STEM.get(skeleton, skeleton)
         s.accent_stems = [TRACK_OF_STEM.get(a, a) for a in accents]
         s.accent_share = {TRACK_OF_STEM.get(k, k): v
@@ -337,10 +471,13 @@ def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
         s.primary_stem = s.skeleton_stem
         s.secondary_stem = s.accent_stems[0] if s.accent_stems else ""
         s.plan_evidence = [
-            "onset 密度/小节：" + "、".join(f"{k}={st['dens'][k]:.1f}" for k in STEMS),
-            "落格率：" + "、".join(f"{k}={st['fit'][k]:.2f}" for k in STEMS),
-            f"voiced_ratio={st['voiced']:.2f}；能量占比 "
-            + "、".join(f"{k}={st['share'][k]:.2f}" for k in STEMS),
+            "onset 密度/小节：" + "、".join(f"{k}={st['dens'][k]:.1f}" for k in stem_set),
+            "落格率：" + "、".join(f"{k}={st['fit'][k]:.2f}" for k in stem_set),
+            f"人声活动 {st['voiced_source']}={st['voiced']:.2f}"
+            + (f"（能量 VAD 口径 {st['voiced_vad']:.2f}，已知不可靠）"
+               if st['voiced_source'] != 'voiced_ratio' else "")
+            + "；能量占比 "
+            + "、".join(f"{k}={st['share'][k]:.2f}" for k in stem_set),
         ]
         s.notes.append(note)
         if suspect:

@@ -20,6 +20,17 @@ v0.3（2026-09-11，落地 8 首官方音频配对标定的结论，见
 - `stemplan` 从单值「主踩音轨」换成 **骨架轨 + 点缀轨 + 估计占比 + 依据**；
 - `intensity` 的绝对量级锚点改走 **NPS**，段落地板可调，**intro/outro 结构封顶**；
 - `climax` 正名为**音频能量高潮**（不是谱面密度峰定位器）。
+
+v0.5（2026-09-12，**分轨细化**；用户指出"采样的话不能只有人声和鼓点两种"）：
+- `stems` 支持 **`htdemucs_6s`**（+guitar/piano），输出目录按模型名分开，
+  不覆盖已有四路缓存；可选 `compact` 落盘（单声道 22.05 kHz PCM_16）；
+- 新增 `pitch_notes`：**basic-pitch**（Apache-2.0）有音高 note 事件，
+  跑在独立的 `.venv-pitch`（uv + python 3.11）里，主管线走子进程 + JSON；
+- `onsets.transient_fx`：`other` stem 的 **>4 kHz 瞬态**（风铃/crash/采样打击/FX）→ `fx` 轨；
+- `tracks` 展示轨集换成 **`drum / vocal / melody / bass`**（仍是 4 条），
+  `fx` / `hook` / `guitar` / `piano` 只进 JSON 与逐小节计数列；
+- **人声活动改用有音高 note 覆盖率** `vocal_pitched_ratio` 替代能量 VAD
+  （后者 n=40 实测把 10/12 首器乐曲判成人声曲）。
 """
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"

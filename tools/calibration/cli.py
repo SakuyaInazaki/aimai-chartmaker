@@ -29,6 +29,7 @@ from . import chartpair as cp
 from . import ending as ending_mod
 from . import loader as loader_mod
 from . import stemhit
+from . import stemrefine
 from . import strata
 from . import weights as weights_mod
 
@@ -752,7 +753,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tol-ms", type=float, default=30.0, help="切轨匹配容差（毫秒）")
     p.add_argument("--ridge-alpha", type=float, default=1.0)
     p.add_argument("--skip-corpus", action="store_true", help="跳过 388 谱结尾形态统计")
+    p.add_argument("--v5-metrics", default=None,
+                   help="**v0.5 分轨细化标定**的 JSON 输出路径。给了才跑"
+                        "「四轨 vs 六轨+音高note+fx」的归因对照、16.8% 收回统计、"
+                        "人声曲副歌复验与强度融合换件的 LOSO 对照"
+                        "（需要各曲目录下已有 stems_htdemucs_6s/ 与 pitch_notes.json，"
+                        "见 tools/audio_analysis/README.md v0.5）")
+    p.add_argument("--v5-only", action="store_true",
+                   help="只跑 v0.5 标定，跳过 n=40 的既有全套（省时间）")
     return p
+
+
+def songs_by_name(songs: list[dict], name: str) -> dict:
+    for s in songs:
+        if s.get("name") == name:
+            return s
+    return {}
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -765,18 +781,65 @@ def run(args: argparse.Namespace) -> dict:
 
     songs: list[dict] = []
     datasets: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    want_v5 = bool(args.v5_metrics)
+    v5_songs: list[dict] = []
+    v5_bundles: dict = {}
+    v5_meta: dict = {}
     for d in dirs:
         print(f"[标定] {d.name} …", flush=True)
-        b = loader_mod.load_song(d)
+        b = loader_mod.load_song(d, with_v5=want_v5)
         s = analyze_song(b, tol=tol)
         songs.append(s)
         feats = s.get("_features", {})
         if len(feats) == len(weights_mod.FEATURE_ORDER):
             X = np.column_stack([feats[k] for k in weights_mod.FEATURE_ORDER])
             datasets[s["name"]] = (X, np.asarray(s["_series"]["d_bar"], dtype=float))
+        if want_v5:
+            v5 = stemrefine.analyze_song_v5(b, tol=tol)
+            v5_songs.append(v5)
+            v5_bundles[s["name"]] = b
+            v5_meta[s["name"]] = {
+                "_bars": s["_series"]["bars"],
+                "_d_bar": s["_series"]["d_bar"],
+                "rho_bar": s["corr"]["spearman_smooth"],
+                "rho_section": s["corr"].get("section_spearman"),
+            }
+            print(f"       v5 轨数 {len(v5.get('track_counts', {}))}、"
+                  f"未解释 {(v5.get('recovery') or {}).get('share_unexplained_base', 0):.3f}"
+                  f" → 收回 {(v5.get('recovery') or {}).get('recovered', 0):.3f}")
         print(f"       ρ={s['corr']['spearman_smooth']:.3f} "
               f"φ*={s['phi_star_ms']:+.1f}ms 主踩="
               f"{[(r['function'], r['best_stem']) for r in s['audio_segments'][:3]]}")
+
+    if want_v5:
+        ds_v5 = stemrefine.build_intensity_datasets(v5_bundles, v5_meta)
+        ds_v4 = {k: (np.column_stack([songs_by_name(songs, k)["_features"][f]
+                                      for f in weights_mod.FEATURE_ORDER]),
+                     np.asarray(songs_by_name(songs, k)["_series"]["d_bar"], float))
+                 for k in ds_v5
+                 if len(songs_by_name(songs, k).get("_features", {}))
+                 == len(weights_mod.FEATURE_ORDER)}
+        v5_out = {
+            "n_songs": len(v5_songs),
+            "tol_ms": float(args.tol_ms),
+            "pool_tracks": (_pt := stemrefine.pool_tracks(v5_songs)),
+            "recovery": stemrefine.pool_recovery(
+                v5_songs, chances={k: v.get("chance_recall") for k, v in _pt.items()}),
+            "by_function": stemrefine.pool_by_function(v5_songs),
+            "vocal_song_chorus": stemrefine.vocal_song_chorus(v5_songs),
+            "song_type": stemrefine.song_type_confusion(v5_songs),
+            "intensity_weights": stemrefine.compare_intensity_weights(
+                ds_v4, ds_v5, alpha=args.ridge_alpha),
+            "rho_strata_v4": stemrefine.stratified_rho(v5_meta, v5_songs, "rho_bar"),
+            "songs": v5_songs,
+        }
+        mp = Path(args.v5_metrics)
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        mp.write_text(json.dumps(v5_out, ensure_ascii=False, indent=1, default=float),
+                      encoding="utf-8")
+        print(f"[输出] v0.5 分轨细化指标 JSON → {mp}")
+        if args.v5_only:
+            return v5_out
 
     calib = weights_mod.calibrate(datasets, alpha=args.ridge_alpha)
     presets = weights_mod.evaluate_presets(datasets, {

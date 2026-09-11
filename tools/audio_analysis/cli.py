@@ -18,14 +18,19 @@ from pathlib import Path
 import numpy as np
 
 from . import (__version__, decode, features as feat_mod, grid as grid_mod,
-               intensity as intensity_mod, onsets, quantize, sheet, stemplan, stems,
-               tracks)
+               intensity as intensity_mod, onsets, pitch_notes as pn_mod, quantize,
+               sheet, stemplan, stems, tracks)
 from .grid import Grid, check_offset, offset_verdict, parse_bpm_changes
 from .structure import (analyze_structure, assign_functions, suggest_division, tier_of)
 
 STEM_ORDER = ("drums", "bass", "other", "vocals")
 DRUM_PARTS = ("kick", "snare", "hihat")
 INSTRUMENTAL_VOICED_THRESHOLD = 0.18   # 全曲 voiced_ratio 低于此判为器乐向
+# 器乐曲判据（v0.5）：能量占比口径。n=40 实测能量 VAD 把 10/12 首器乐曲判成人声曲，
+# 所以"这首是不是人声曲"改用 `share_vocals`（标定报告 n40 §5.3，阈值 0.10）。
+INSTRUMENTAL_SHARE_VOCALS = 0.10
+# 跑 basic-pitch 的 stem（有旋律性质的都跑；drums 不跑）
+PITCH_STEMS = ("vocals", "other", "guitar", "piano", "bass")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,8 +48,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bpm-changes", default=None,
                    help='变速点，格式 "小节号:BPM,小节号:BPM"（可选，实验性）')
     p.add_argument("--beats-per-bar", type=int, default=4, help="每小节拍数（默认 4）")
-    p.add_argument("--model", default="htdemucs",
-                   help="Demucs 模型（htdemucs / htdemucs_ft，默认 htdemucs）")
+    p.add_argument("--model", default=stems.DEFAULT_MODEL,
+                   help="Demucs 模型（htdemucs / htdemucs_ft / **htdemucs_6s**，"
+                        "默认 htdemucs）。六路模型额外给 guitar / piano 两轨，"
+                        "输出目录按模型名分开（stems / stems_htdemucs_6s），"
+                        "不会覆盖已有四路缓存")
+    p.add_argument("--compact-stems", action="store_true",
+                   help="stem 落盘写单声道 22.05kHz PCM_16（体积 1/8，分析口径无损）")
+    p.add_argument("--no-pitch-notes", action="store_true",
+                   help="跳过 basic-pitch 有音高 note 检测（.venv-pitch 缺席时自动跳过）")
+    p.add_argument("--pitch-venv", default=None,
+                   help="basic-pitch 所在的 venv（默认仓库根 .venv-pitch）")
+    p.add_argument("--pitch-backend", default="onnx",
+                   choices=("onnx", "coreml", "tf", "tflite"),
+                   help="basic-pitch 后端，默认 onnx（与 coreml 数值实测一致，"
+                        "但 coreml 退出时会抛 recursive_mutex 异常）")
     p.add_argument("--device", default="auto", help="推理设备 auto/mps/cpu/cuda")
     p.add_argument("--out", required=True, help="输出目录")
     p.add_argument("--divisions", default="4,8,12,16,24,32", help="候选分音（扫描顺序）")
@@ -185,15 +203,17 @@ def run(args: argparse.Namespace) -> dict:
     # ---- 4. 分离 ----
     stem_info = {"model": "skipped", "device": "-", "elapsed_sec": 0.0, "stems": {}}
     stem_audio: dict[str, np.ndarray] = {}
-    stems_dir = out_dir / "stems"
+    stem_names = stems.stems_for(args.model)
+    stems_dir = stems.stems_dir_for(out_dir, args.model)
     if not args.skip_stems:
         t0 = time.time()
         stem_info = stems.separate(wav, stems_dir, model_name=args.model,
-                                   device=args.device, force=args.force)
+                                   device=args.device, force=args.force,
+                                   compact=bool(args.compact_stems))
         timings["stems"] = time.time() - t0
         print(f"[4/8] 分离（{stem_info['model']} @ {stem_info['device']}，"
-              f"{timings['stems']:.1f}s）")
-        for name in STEM_ORDER:
+              f"{timings['stems']:.1f}s，{len(stem_names)} 轨 → {stems_dir.name}/）")
+        for name in stem_names:
             p = stems_dir / f"{name}.wav"
             if p.exists():
                 stem_audio[name], _ = stems.load_stem_mono(p, sr=onsets.ANALYSIS_SR)
@@ -204,7 +224,7 @@ def run(args: argparse.Namespace) -> dict:
     # ---- 5. onset / 鼓件 / VAD / 人声音高 ----
     t0 = time.time()
     tracks_map: dict[str, onsets.OnsetTrack] = {}
-    for name in STEM_ORDER:
+    for name in stem_names:
         y = stem_audio.get(name)
         if y is not None:
             tracks_map[name] = onsets.detect_onsets(y, name, sr=onsets.ANALYSIS_SR,
@@ -213,6 +233,10 @@ def run(args: argparse.Namespace) -> dict:
         tracks_map.update(onsets.drum_components(stem_audio["drums"],
                                                  drums_track=tracks_map.get("drums"),
                                                  sr=onsets.ANALYSIS_SR, hop=onsets.HOP))
+    # v0.5：`fx` 点缀轨 —— other stem 的 >4 kHz 瞬态（风铃/crash/采样打击/FX）
+    if "other" in stem_audio:
+        tracks_map["fx"] = onsets.transient_fx(stem_audio["other"],
+                                               sr=onsets.ANALYSIS_SR, hop=onsets.HOP)
     if "vocals" in stem_audio:
         vad = onsets.vocal_activity(stem_audio["vocals"], sr=onsets.ANALYSIS_SR,
                                     hop=onsets.HOP)
@@ -221,6 +245,39 @@ def run(args: argparse.Namespace) -> dict:
         vad = {"threshold_db": None, "active": np.zeros(0, dtype=bool),
                "times": np.zeros(0)}
         vocal_act = np.zeros(grid.n_bars)
+    timings["onsets"] = time.time() - t0
+
+    # ---- 5b. 有音高 note（basic-pitch 子进程；v0.5）----
+    t0 = time.time()
+    pitch_map: dict = {}
+    pitch_info: dict = {"enabled": False, "backend": args.pitch_backend, "stems": {}}
+    if not args.no_pitch_notes and stem_audio:
+        wavs = {n: stems_dir / f"{n}.wav" for n in PITCH_STEMS
+                if n in stem_audio and (stems_dir / f"{n}.wav").exists()}
+        pitch_map = pn_mod.detect_batch(wavs, venv=args.pitch_venv,
+                                        backend=args.pitch_backend,
+                                        cache_path=stems_dir / "pitch_notes.json",
+                                        force=args.force)
+        pitch_info["enabled"] = any(v.available for v in pitch_map.values())
+        pitch_info["stems"] = {
+            k: {"available": v.available, "n_notes": v.count,
+                "elapsed_sec": v.elapsed_sec, "error": v.error[:300]}
+            for k, v in pitch_map.items()}
+    timings["pitch_notes"] = time.time() - t0
+
+    # v0.5 的两条派生流：melody（有音高 note 合并）与 fx（已在上面算好）
+    melody_times = tracks.build_melody_times(pitch_map)
+    if melody_times.size:
+        tracks_map["melody"] = onsets.OnsetTrack(
+            "melody", melody_times, np.ones(melody_times.size), np.zeros(0),
+            np.zeros(0), heuristic=False)
+    # vocal 轨的踩音候选 = 能量 onset ∪ 有音高 note onset（长音/legato 只有后者抓得到）
+    v_notes = pitch_map.get("vocals")
+    if v_notes is not None and v_notes.available and v_notes.count and "vocals" in tracks_map:
+        merged_vocal = tracks.merge_times(tracks_map["vocals"].times, v_notes.onsets)
+        tracks_map["vocals"] = onsets.OnsetTrack(
+            "vocals", merged_vocal, np.ones(merged_vocal.size),
+            tracks_map["vocals"].env, tracks_map["vocals"].env_times)
 
     onset_times = {k: v.times for k, v in tracks_map.items()}
     char_masks: dict[str, dict] = {}
@@ -233,11 +290,22 @@ def run(args: argparse.Namespace) -> dict:
         char_masks.setdefault("drums", {})["kick"] = np.array(
             [round(float(t), 6) in kt for t in dt], dtype=bool)
     if "vocals" in stem_audio:
-        char_masks.setdefault("vocals", {})["pitched"] = tracks.pitched_mask(
-            stem_audio["vocals"], tracks_map["vocals"].times, onsets.ANALYSIS_SR)
-    timings["onsets"] = time.time() - t0
+        if v_notes is not None and v_notes.available and v_notes.count:
+            # v0.5：「有音高」改由 basic-pitch 判定（替代 librosa yin 的零模型代替品）
+            pn_set = np.asarray(v_notes.onsets, dtype=float)
+            char_masks.setdefault("vocals", {})["pitched"] = np.array(
+                [bool(np.min(np.abs(pn_set - float(t))) <= 0.05)
+                 for t in tracks_map["vocals"].times], dtype=bool)
+            vad = pn_mod.as_activity(v_notes, np.asarray(vad.get("times"), dtype=float))
+        else:
+            char_masks.setdefault("vocals", {})["pitched"] = tracks.pitched_mask(
+                stem_audio["vocals"], tracks_map["vocals"].times, onsets.ANALYSIS_SR)
     print("[5/8] onset：" + "、".join(f"{k}={v.count}" for k, v in tracks_map.items())
-          + f"（{timings['onsets']:.1f}s）")
+          + f"（{timings['onsets']:.1f}s）"
+          + ("；有音高 note：" + "、".join(
+              f"{k}={v.count}" for k, v in pitch_map.items() if v.available)
+             + f"（{timings['pitch_notes']:.1f}s）" if pitch_info["enabled"]
+             else "；basic-pitch 未启用"))
 
     # ---- 6. 量化（每小节唯一 div）+ 四轨渲染 ----
     t0 = time.time()
@@ -245,8 +313,11 @@ def run(args: argparse.Namespace) -> dict:
     bar_div, per_track_slots, qstats = quantize.quantize_song(
         onset_times, grid, divisions=divisions, allow_fine=not args.no_fine_div,
         outlier_ratio=args.div_outlier_ratio)
+    track_order = (tracks.TRACK_ORDER_V5 if "melody" in onset_times
+                   else tracks.TRACK_ORDER)
     track_patterns = tracks.build_track_patterns(grid, bar_div, onset_times,
-                                                 per_track_slots, char_masks, vad)
+                                                 per_track_slots, char_masks, vad,
+                                                 track_order=track_order)
     timings["quantize"] = time.time() - t0
     print(f"[6/8] 量化：分音分布 {qstats['division_share']}，"
           f"未落格 {qstats['unquantized_ratio']:.1%}"
@@ -257,7 +328,8 @@ def run(args: argparse.Namespace) -> dict:
     bar_features = feat_mod.build_bar_features(grid, stem_audio, onsets.ANALYSIS_SR,
                                                onset_times, vocal_act, y_mix=y_mix,
                                                bar_division={b: bar_div[b].division
-                                                             for b in bar_div})
+                                                             for b in bar_div},
+                                               pitch_notes=pitch_map or None)
     timings["features"] = time.time() - t0
 
     # ---- 8. 结构 + 强度 + 切轨 ----
@@ -274,7 +346,15 @@ def run(args: argparse.Namespace) -> dict:
         fusion_weights=_parse_weights(args.fusion_weights))
 
     global_voiced = float(np.mean(vocal_act)) if vocal_act.size else 0.0
-    instrumental = global_voiced < INSTRUMENTAL_VOICED_THRESHOLD
+    # v0.5：器乐曲判据换成能量占比（n=40 实测能量 VAD 把 10/12 首器乐曲判成人声曲）；
+    # 有 basic-pitch 时再与"人声有音高 note 覆盖率"取交叉验证。
+    share_vocals_mean = float(np.mean(bar_features.get("share_vocals", np.zeros(1))))
+    pitched_vocal_mean = float(np.mean(bar_features["vocal_pitched_ratio"])) \
+        if "vocal_pitched_ratio" in bar_features else None
+    instrumental = share_vocals_mean < INSTRUMENTAL_SHARE_VOCALS
+    if pitched_vocal_mean is not None:
+        instrumental = instrumental and pitched_vocal_mean < 0.30
+    instrumental_legacy = global_voiced < INSTRUMENTAL_VOICED_THRESHOLD
     segments = struct["segments"]
     segments, fn_notes = assign_functions(segments, ires.bar_intensity, bar_features,
                                           grid, instrumental=instrumental)
@@ -336,11 +416,15 @@ def run(args: argparse.Namespace) -> dict:
             "intensity_tier": tier_of(float(ires.bar_intensity[bar - 1])),
             "density_norm": round(float(bar_density_norm[bar - 1]), 4),
             "suggested_notes": round(float(bar_suggested[bar - 1]), 2),
-            "patterns": {t: track_patterns[t][bar].pattern for t in tracks.TRACK_ORDER},
+            "patterns": {t: track_patterns[t][bar].pattern for t in track_order},
             "features": {k: round(float(v[bar - 1]), 4)
                          for k, v in bar_features.items() if len(v) >= bar},
         }
         row["n_onset_hihat"] = row["features"].get("n_onset_hihat", 0)
+        # 只进 JSON / 计数列、不铺网格串的轨（v2 §5.2(d) 轨数上限 4）
+        row["extra_counts"] = {k: row["features"].get(f"n_onset_{k}", 0)
+                               for k in ("fx", "other", "guitar", "piano")
+                               if f"n_onset_{k}" in row["features"]}
         bar_rows.append(row)
 
     tgt = {
@@ -387,7 +471,22 @@ def run(args: argparse.Namespace) -> dict:
         "vocal_vad": {"threshold_db": vad.get("threshold_db"),
                       "active_bar_ratio": float((vocal_act > 0.3).mean()),
                       "global_voiced_ratio": round(global_voiced, 4),
-                      "instrumental": instrumental},
+                      "instrumental": instrumental,
+                      "instrumental_criterion": (
+                          f"share_vocals 均值 {share_vocals_mean:.4f} < "
+                          f"{INSTRUMENTAL_SHARE_VOCALS}"
+                          + (f" ∧ 人声有音高覆盖率 {pitched_vocal_mean:.4f} < 0.30"
+                             if pitched_vocal_mean is not None else "")),
+                      "share_vocals_mean": round(share_vocals_mean, 4),
+                      "vocal_pitched_ratio_mean": (
+                          round(pitched_vocal_mean, 4)
+                          if pitched_vocal_mean is not None else None),
+                      "instrumental_legacy_vad": instrumental_legacy,
+                      "note": ("v0.5：器乐/人声的判定改用能量占比 + basic-pitch 有音高 "
+                               "note 覆盖率；能量 VAD `global_voiced_ratio` 保留为兼容"
+                               "字段，n=40 实测它把 10/12 首器乐曲判成人声曲，不可用")},
+        "pitch_notes": pitch_info,
+        "track_order": list(track_order),
         "quantize": qstats,
         "bar_divisions": {str(b): bar_div[b].to_dict() for b in bar_div},
         "structure": {

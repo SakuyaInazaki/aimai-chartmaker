@@ -21,11 +21,67 @@ import numpy as np
 
 from .quantize import BarPattern, render_pattern
 
-# 逻辑轨 → 来源 stem
-TRACK_SOURCE = {"drum": "drums", "vocal": "vocals", "bass": "bass", "hook": "other"}
+# 逻辑轨 → 来源 onset 流的 key（v0.5 起 `melody` / `fx` 是本项目派生的流，不是 stem）
+TRACK_SOURCE = {
+    "drum": "drums", "vocal": "vocals", "bass": "bass", "hook": "other",
+    # v0.5 新增
+    "melody": "melody",     # other + guitar + piano 的**有音高 note** onset 合并
+    "fx": "fx",             # other stem 的 >4 kHz 瞬态（风铃/crash/采样打击/FX）
+    "guitar": "guitar",     # htdemucs_6s 细分（只进 JSON）
+    "piano": "piano",       # htdemucs_6s 细分（只进 JSON）
+}
+#: v0.4 的展示轨集（四路分离、无音高 note 时的兜底）
 TRACK_ORDER = ("drum", "vocal", "bass", "hook")
+#: **v0.5 的展示轨集**：`hook`（other 全带能量 onset）被 `melody`（有音高 note）取代。
+#: 仍然是 4 条 —— v2 §5.2(d) 的「轨数上限 4」不变（轨越多越诱导 LLM 采密，违反知识 005）。
+TRACK_ORDER_V5 = ("drum", "vocal", "melody", "bass")
+#: 只进 `song_analysis.json` 与逐小节计数列、**不铺网格串**的轨
+JSON_ONLY_TRACKS = ("fx", "hook", "guitar", "piano")
 
 CHARSET = ("X", "x", "-", ".")
+
+MERGE_MS = 30.0     # 合并多条流时的去重窗（与标定容差同量级）
+
+
+def merge_times(*arrays, merge_ms: float = MERGE_MS) -> np.ndarray:
+    """把多条 onset/note 时间流合并去重成一条（升序）。"""
+    pool = [np.atleast_1d(np.asarray(a, dtype=float)) for a in arrays if a is not None]
+    pool = [a for a in pool if a.size]
+    if not pool:
+        return np.zeros(0)
+    allt = np.sort(np.concatenate(pool))
+    thr = merge_ms / 1000.0
+    keep = [float(allt[0])]
+    for t in allt[1:]:
+        if float(t) - keep[-1] > thr:
+            keep.append(float(t))
+    return np.asarray(keep, dtype=float)
+
+
+def build_melody_times(pitch_notes: dict, stems=("other", "guitar", "piano"),
+                       merge_ms: float = MERGE_MS, lead_only: bool = True,
+                       min_confidence: float = 0.0) -> np.ndarray:
+    """`melody` 轨 = other/guitar/piano 的**有音高 note onset** 合并去重。
+
+    为什么不是它们的能量 onset：能量 onset 抓不到长音、分解和弦、legato 换音，
+    而官方谱大量踩这些（n=40 实测 16.8% 的官方 note 什么 stem 的能量 onset 都不落）。
+
+    `lead_only=True`（默认）：只取**最高声部**（见 `pitch_notes.lead_mask`）。
+    basic-pitch 是复音转录器，和弦会吐 3–5 个 note，不筛的话候选池密度比鼓轨
+    还高一个数量级（🧪 Signature 实测 other 单轨 3450 个 note vs drums 476 个能量 onset）。
+    """
+    from . import pitch_notes as pn_mod
+
+    arrs = []
+    for s in stems:
+        n = (pitch_notes or {}).get(s)
+        if n is None or not getattr(n, "available", False) or not n.count:
+            continue
+        if lead_only or min_confidence > 0:
+            n = pn_mod.filtered(n, lead_only=lead_only, min_confidence=min_confidence)
+        if n.count:
+            arrs.append(np.asarray(n.onsets, dtype=float))
+    return merge_times(*arrs, merge_ms=merge_ms)
 
 
 def _slot_windows(grid, bar: int, division: int) -> tuple[np.ndarray, np.ndarray]:
@@ -83,18 +139,20 @@ def build_track_patterns(
     per_track_slots: dict[str, dict[int, list[int]]],
     char_masks: dict[str, dict],
     vad: dict | None = None,
+    track_order: tuple[str, ...] = TRACK_ORDER,
 ) -> dict[str, dict[int, BarPattern]]:
-    """渲染四条逻辑轨的逐小节网格串。
+    """渲染各条逻辑轨的逐小节网格串。
 
     参数：
         char_masks: {stem: {"strong": mask, "kick": mask, "pitched": mask}}
         vad: `onsets.vocal_activity` 的返回（给 vocal 轨的 `-` 延音用）
+        track_order: 要渲染哪几条轨（默认 v0.4 的四条；v0.5 传 `TRACK_ORDER_V5`）
     """
-    out: dict[str, dict[int, BarPattern]] = {t: {} for t in TRACK_ORDER}
+    out: dict[str, dict[int, BarPattern]] = {t: {} for t in track_order}
     vad_active = np.asarray(vad.get("active")) if vad else np.zeros(0, dtype=bool)
     vad_times = np.asarray(vad.get("times")) if vad else np.zeros(0)
 
-    for track in TRACK_ORDER:
+    for track in track_order:
         stem = TRACK_SOURCE[track]
         times = np.atleast_1d(np.asarray(onset_times.get(stem, np.zeros(0)), dtype=float))
         slots = per_track_slots.get(stem, {})

@@ -156,12 +156,18 @@ def best_shift(event_times, onset_times, shifts_sec, tol: float = DEFAULT_TOL_SE
     }
 
 
-def explain_breakdown(event_times, stem_onsets: dict, tol: float = DEFAULT_TOL_SEC
-                      ) -> dict:
+#: v0.4 的四路基线轨（"原来"）
+BASE_TRACKS = ("drums", "bass", "other", "vocals")
+
+
+def explain_breakdown(event_times, stem_onsets: dict, tol: float = DEFAULT_TOL_SEC,
+                      base_tracks: tuple[str, ...] = BASE_TRACKS) -> dict:
     """全曲层面的归因：每个官方时间槽被哪些 stem 解释。
 
     返回各类占比：``drums_only`` / ``vocals_only`` / ``both_drums_vocals`` /
-    ``other_or_bass_only`` / ``none``（谱师自由发挥或装饰音）/ ``any``。
+    ``none``（谱师自由发挥或装饰音）/ ``any``；
+    ⚠️ ``any`` / ``none`` **只按 `base_tracks` 算**（= 四路基线口径，与 n=40 报告
+    的 16.8% 可比）；新轨的贡献另见 ``per_track`` 与 `recovery_breakdown`。
     """
     ev = np.atleast_1d(np.asarray(event_times, dtype=float))
     n = int(ev.size)
@@ -172,11 +178,18 @@ def explain_breakdown(event_times, stem_onsets: dict, tol: float = DEFAULT_TOL_S
     v = masks.get("vocals", np.zeros(n, dtype=bool))
     b = masks.get("bass", np.zeros(n, dtype=bool))
     o = masks.get("other", np.zeros(n, dtype=bool))
-    any_ = d | v | b | o
-    return {
+    base = np.zeros(n, dtype=bool)
+    for k in base_tracks:
+        base |= masks.get(k, np.zeros(n, dtype=bool))
+    all_ = np.zeros(n, dtype=bool)
+    for m in masks.values():
+        all_ |= m
+    out = {
         "n_events": n,
-        "any": float(np.mean(any_)),
-        "none": float(np.mean(~any_)),
+        "any": float(np.mean(base)),
+        "none": float(np.mean(~base)),
+        "any_all_tracks": float(np.mean(all_)),
+        "none_all_tracks": float(np.mean(~all_)),
         "drums": float(np.mean(d)),
         "vocals": float(np.mean(v)),
         "bass": float(np.mean(b)),
@@ -185,6 +198,63 @@ def explain_breakdown(event_times, stem_onsets: dict, tol: float = DEFAULT_TOL_S
         "vocals_only": float(np.mean(v & ~d & ~b & ~o)),
         "both_drums_vocals": float(np.mean(d & v)),
         "no_drums": float(np.mean(~d)),
+        "per_track": {k: float(np.mean(m)) for k, m in masks.items()},
+    }
+    return out
+
+
+def recovery_breakdown(event_times, stem_onsets: dict,
+                       base_tracks: tuple[str, ...] = BASE_TRACKS,
+                       new_tracks: tuple[str, ...] = (),
+                       tol: float = DEFAULT_TOL_SEC) -> dict:
+    """**"原来什么都不落的那一批，现在被哪些新轨收回多少"**。
+
+    n=40 报告 §5.2 的核心遗留数字：**16.8% 的官方 note 落不到四路的任何一条
+    onset 上**（谱师自由发挥 / 装饰 / onset 漏检，三者当时无法区分）。
+    v0.5 加了 `guitar` / `piano`（六路分离）、`melody`（有音高 note）、
+    `fx`（>4 kHz 瞬态）几条新轨 —— 这个函数就是量它们到底捞回多少。
+
+    返回：
+        ``n_unexplained_base``  四路口径下没被解释的时间槽数
+        ``share_unexplained_base``  它占全部时间槽的比例（= 报告里的 16.8%）
+        ``recovered``  新轨里至少一条解释掉的比例（**分母是未解释的那一批**）
+        ``recovered_share_of_all``  换算成占全部时间槽的比例
+        ``by_track``  每条新轨**单独**能收回未解释批次的多少（会重叠）
+        ``by_track_exclusive``  该轨是**唯一**能解释它的新轨的比例
+        ``still_none``  新轨全上之后仍然什么都不落的比例（分母仍是全部时间槽）
+    """
+    ev = np.atleast_1d(np.asarray(event_times, dtype=float))
+    n = int(ev.size)
+    if n == 0:
+        return {}
+    base = np.zeros(n, dtype=bool)
+    for k in base_tracks:
+        base |= covered_mask(ev, stem_onsets.get(k, np.zeros(0)), tol)
+    un = ~base
+    n_un = int(un.sum())
+    new_masks = {k: covered_mask(ev, stem_onsets.get(k, np.zeros(0)), tol)
+                 for k in new_tracks}
+    any_new = np.zeros(n, dtype=bool)
+    for m in new_masks.values():
+        any_new |= m
+    rec = un & any_new
+    by_track, by_excl = {}, {}
+    for k, m in new_masks.items():
+        by_track[k] = float((un & m).sum() / n_un) if n_un else float("nan")
+        others = np.zeros(n, dtype=bool)
+        for k2, m2 in new_masks.items():
+            if k2 != k:
+                others |= m2
+        by_excl[k] = float((un & m & ~others).sum() / n_un) if n_un else float("nan")
+    return {
+        "n_events": n,
+        "n_unexplained_base": n_un,
+        "share_unexplained_base": float(n_un / n),
+        "recovered": float(rec.sum() / n_un) if n_un else float("nan"),
+        "recovered_share_of_all": float(rec.sum() / n),
+        "by_track": by_track,
+        "by_track_exclusive": by_excl,
+        "still_none": float((un & ~any_new).sum() / n),
     }
 
 

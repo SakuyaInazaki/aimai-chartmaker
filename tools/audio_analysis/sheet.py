@@ -18,9 +18,18 @@ from pathlib import Path
 import numpy as np
 
 from .structure import LABELS_JA
-from .tracks import TRACK_ORDER
+from .tracks import TRACK_ORDER, TRACK_ORDER_V5
 
-TRACK_HEADER = {"drum": "drum ", "vocal": "vocal", "bass": "bass ", "hook": "hook "}
+TRACK_HEADER = {"drum": "drum  ", "vocal": "vocal ", "bass": "bass  ", "hook": "hook  ",
+                "melody": "melody", "fx": "fx    ", "guitar": "guitar", "piano": "piano "}
+
+
+def _track_order(payload: dict) -> tuple[str, ...]:
+    """这份 payload 用的是 v0.4 四轨还是 v0.5 的 `drum/vocal/melody/bass`。"""
+    order = payload.get("track_order")
+    if order:
+        return tuple(order)
+    return TRACK_ORDER
 
 # 旧文件名（v0.1）→ 新文件名，保留兼容
 LEGACY_NAMES = {"song_sheet.md": "song-sheet.md", "song_analysis.json": "analysis.json"}
@@ -142,9 +151,32 @@ def _header(payload: dict) -> list[str]:
     L.append("> 字符集（仅这四个）：`X` 重音（drum=kick / vocal=有音高且强 / 其他=强 onset）、"
              "`x` 普通 onset、`-` 延音持续（人声 VAD 有声但无新 onset）、`.` 空。")
     L.append(">")
-    L.append("> 四条轨：`drum`（鼓，X=kick）/ `vocal`（人声）/ `bass` / `hook`（other stem："
-             "吉他/合成器/riff）。hihat 不给网格串，只在逐小节表给计数列"
-             "（密集段里它与 kick 的串常常完全一样，铺出来是噪声）。")
+    order = _track_order(payload)
+    if tuple(order) == TRACK_ORDER_V5:
+        L.append("> 四条轨（v0.5）：`drum`（鼓，X=kick）/ `vocal`（人声，"
+                 "**能量 onset ∪ basic-pitch 有音高 note**）/ "
+                 "`melody`（**有音高的主旋律**：other+guitar+piano 的 basic-pitch "
+                 "note onset 合并 —— 合成器主旋律 / 钢琴 / 吉他 riff，"
+                 "**能量 onset 抓不到的长音、分解和弦、legato 换音靠它**）/ `bass`。")
+        L.append(">")
+        L.append("> **不铺网格串、只给计数列**的轨：`fx`（other 的 >4 kHz 瞬态："
+                 "风铃 / crash / 采样打击 / FX）、`other`（other 的全带能量 onset）、"
+                 "`guitar` / `piano`（htdemucs_6s 细分）、`hihat`。"
+                 "轨数上限 4 是硬约束（v2 §5.2(d)）——铺 8 条轨会诱导采密，违反知识 005。")
+        L.append(">")
+        L.append("> ⚠️ **`melody` 这一行是候选池里最脏的一条，必须当「轮廓」读、不能照抄**："
+                 "40 首实测它的 lift 只有 **1.61**、precision **0.338**（`drum` 是 2.73/0.617，"
+                 "`other` 是 2.30/0.528）—— 它的高命中率是**靠撒得密**换来的，"
+                 "官方谱只采用它约三分之一。它的价值在于**能量 onset 抓不到的那类音**"
+                 "（长音、分解和弦、legato 换音），不在于「这里有很多可踩的音」。"
+                 "详见 `docs/research/stem-refinement-n40.md` §2。")
+        L.append(">")
+        L.append("> ★ **点缀音效（`fx`）是稀有高价值资源**：实测 precision 0.460、lift 1.99，"
+                 "但每首只有几十个 —— 段落表里标了 `+fx★` 的段，重音处优先给它。")
+    else:
+        L.append("> 四条轨：`drum`（鼓，X=kick）/ `vocal`（人声）/ `bass` / `hook`（other stem："
+                 "吉他/合成器/riff）。hihat 不给网格串，只在逐小节表给计数列"
+                 "（密集段里它与 kick 的串常常完全一样，铺出来是噪声）。")
     L.append("")
     return L
 
@@ -160,6 +192,9 @@ def _sections(payload: dict, segments) -> list[str]:
     for s in segments:
         rep = f"{s.repeat_of[0]}–{s.repeat_of[1]}" if s.repeat_of else "—"
         acc = "＞".join(s.accent_stems) if s.accent_stems else "—"
+        # v0.5：稀疏高精度轨（fx）不占点缀名额，但要显式写出来
+        if getattr(s, "sparse_accents", None):
+            acc += "（+" + "/".join(s.sparse_accents) + "★稀有高价值）"
         share = "、".join(f"{k} {v:.2f}" for k, v in (s.accent_share or {}).items())
         L.append(
             f"| {s.start_bar}–{s.end_bar} | {s.label_ja} | {s.intensity:.2f}"
@@ -169,10 +204,18 @@ def _sections(payload: dict, segments) -> list[str]:
             f"{'✅' if s.upgrade else '—'} | {'✅' if s.rest else '—'} |")
     L.append("")
     L.append("> **骨架 / 点缀 / 依据**（v0.3 模型，取代 v0.2 的单值「主踩音轨」）："
-             "官方谱的实测形态是 **鼓骨架 + 大量非鼓填充**——8 首配对标定里 drums 命中率"
-             "0.607、**36.2% 的官方 note 不落在鼓上**、只落鼓的仅 28.1%、只落人声的仅 3.2%，"
-             "另有 **18.6% 什么 stem 都不落**（谱师自由发挥/装饰，占比里记作 `free`）。"
+             "官方谱的实测形态是 **鼓骨架 + 大量非鼓填充** —— **40 首**官方音频×官方谱"
+             "配对标定实测：drums 命中率 **0.639**、**34.3% 的官方 note 不落在鼓上**、"
+             "只落鼓的 30.4%、只落人声的仅 3.5%，另有 **16.8% 什么 stem 都不落**"
+             "（谱师自由发挥/装饰，占比里记作 `free`）。"
              "**没有任何一段是「只踩一条轨」**，所以别把「骨架」读成「整段只踩这条」。")
+    L.append(">")
+    L.append("> **各轨的「含金量」**（v0.5 实测 lift = 命中率 / 该轨 onset 密度下的随机基线，"
+             "40 首，`docs/research/stem-refinement-n40.md` §2）："
+             "`drum` **2.73** ＞ `piano` **2.44** ＞ `hook`(other) **2.30** ＞ `vocal` **2.16** "
+             "＞ `fx` **1.99** ＞ `bass` **1.93** ＞ `guitar` **1.79** ＞ `melody` **1.61**。"
+             "**比较不同密度的轨时只能看 lift，不能看命中率** —— `melody` 的命中率 0.698 "
+             "是 `hook` 0.267 的 2.6 倍，但它的含金量反而最低。")
     L.append("")
     L.append("**逐段备注与依据**")
     L.append("")
@@ -194,6 +237,7 @@ def _sections(payload: dict, segments) -> list[str]:
 
 
 def _bars(payload: dict, bar_rows: list[dict], segments) -> list[str]:
+    order = _track_order(payload)
     seg_of_bar: dict[int, str] = {}
     for s in segments:
         for b in range(s.start_bar, s.end_bar + 1):
@@ -212,13 +256,16 @@ def _bars(payload: dict, bar_rows: list[dict], segments) -> list[str]:
         head = (f"bar {bar:>3} | {label} | I={r['intensity']:.2f}"
                 f" | div={r['division']:<2} | ")
         pad = " " * _display_width(head)
-        for i, t in enumerate(TRACK_ORDER):
+        for i, t in enumerate(order):
             prefix = head if i == 0 else pad
-            L.append(f"{prefix}{TRACK_HEADER[t]} {r['patterns'].get(t, '')}")
+            L.append(f"{prefix}{TRACK_HEADER.get(t, t)} {r['patterns'].get(t, '')}")
         extra_pad = pad
         extra = []
         if r.get("n_onset_hihat"):
             extra.append(f"hihat×{int(r['n_onset_hihat'])}")
+        for k, v in (r.get("extra_counts") or {}).items():
+            if v:
+                extra.append(f"{k}×{int(v)}")
         if r.get("suggested_notes"):
             extra.append(f"建议≈{r['suggested_notes']:.1f} note")
         if not r.get("resolved", True):

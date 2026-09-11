@@ -5,6 +5,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+# basic-pitch 专用的 py3.11 venv（uv 建，见 tools/audio_analysis/README.md v0.5）
+.venv-pitch/
 venv/
 *.egg-info/
 dist/

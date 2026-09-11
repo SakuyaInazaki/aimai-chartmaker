@@ -72,6 +72,10 @@ class Segment:
     # v0.3：骨架轨 + 点缀轨（替换 v0.2 的单值主踩/副踩，见 stemplan.py 模块注释）
     skeleton_stem: str = ""
     accent_stems: list[str] = field(default_factory=list)
+    # v0.5：稀疏高精度轨（目前只有 `fx`）。它按 onset 密度永远排不进 accent_stems，
+    # 但 n=40 实测 precision 0.460 / lift 1.99 —— "稀少但一出现就被采用"，
+    # 所以单列一格，不占 accent_stems 的名额。
+    sparse_accents: list[str] = field(default_factory=list)
     accent_share: dict = field(default_factory=dict)
     plan_evidence: list[str] = field(default_factory=list)
     # ⚠️ 已弃用（v0.2 单值模型的兼容字段）：primary = skeleton、secondary = 第一条 accent
@@ -117,6 +121,7 @@ class Segment:
             "suggested_division": self.suggested_division,
             "skeleton_stem": self.skeleton_stem,
             "accent_stems": list(self.accent_stems),
+            "sparse_accents": list(self.sparse_accents),
             "accent_share": dict(self.accent_share),
             "plan_evidence": list(self.plan_evidence),
             # ⚠️ deprecated（v0.2 兼容字段，下游请改读 skeleton_stem / accent_stems）

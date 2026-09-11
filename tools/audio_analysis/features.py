@@ -215,36 +215,78 @@ def high_freq_ratio(y: np.ndarray, sr: int, grid, lo: float = 6000.0,
     return out
 
 
+#: 参与"能量占比 / 落格率"统计的 stem（v0.5：六路分离时自动带上 guitar/piano）
+BASE_STEMS = ("drums", "bass", "other", "vocals")
+EXTRA_STEMS_6S = ("guitar", "piano")
+#: v0.5 新增的派生轨（不是 Demucs stem，是本项目算出来的）
+DERIVED_TRACKS = ("melody", "fx")
+
+
 def build_bar_features(grid, stem_audio: dict[str, np.ndarray], sr: int,
                        onset_times: dict[str, np.ndarray],
                        vocal_act: np.ndarray,
                        y_mix: np.ndarray | None = None,
-                       bar_division: dict[int, int] | None = None) -> dict[str, np.ndarray]:
-    """汇总 v2 §4.1 的逐小节特征表。"""
+                       bar_division: dict[int, int] | None = None,
+                       pitch_notes: dict | None = None) -> dict[str, np.ndarray]:
+    """汇总 v2 §4.1 的逐小节特征表（v0.5 扩到六路 stem + 音高 note 轨 + fx 轨）。
+
+    参数：
+        pitch_notes: {stem 名: `pitch_notes.PitchNotes`}，来自 basic-pitch。
+            给了就额外产出 `n_pnote_<stem>` / `pitched_cov_<stem>`，并把
+            **`vocal_pitched_ratio`**（人声有音高 note 的时间覆盖率）作为
+            能量 VAD `voiced_ratio` 的替代品输出。
+    """
     feats: dict[str, np.ndarray] = {}
     energies = {k: energy_per_bar(v, sr, grid) for k, v in stem_audio.items()}
     for name, arr in share_per_bar(energies).items():
         feats[f"share_{name}"] = arr
-    for name in ("drums", "bass", "other", "vocals", "kick", "snare", "hihat"):
+
+    counted = tuple(BASE_STEMS) + EXTRA_STEMS_6S + ("kick", "snare", "hihat") \
+        + DERIVED_TRACKS
+    fitted = tuple(BASE_STEMS) + EXTRA_STEMS_6S + DERIVED_TRACKS
+    for name in counted:
         t = onset_times.get(name)
         if t is None:
             continue
-        counts = np.zeros(grid.n_bars, dtype=float)
         t = np.atleast_1d(np.asarray(t, dtype=float))
-        for bar in range(1, grid.n_bars + 1):
-            t0 = grid.bar_start(bar)
-            counts[bar - 1] = float(np.sum((t >= t0) & (t < t0 + grid.bar_duration(bar))))
-        feats[f"n_onset_{name}"] = counts
-        if name in ("drums", "bass", "other", "vocals"):
+        feats[f"n_onset_{name}"] = _count_per_bar(t, grid)
+        if name in fitted:
             feats[f"grid_fit_{name}"] = grid_fit_per_bar(t, grid, division=8)
             if bar_division:
                 feats[f"grid_fit_bar_{name}"] = grid_fit_vs_bar_division(
                     t, grid, bar_division)
-    feats["voiced_ratio"] = np.asarray(vocal_act, dtype=float)
-    feats["n_onset_merged"] = merged_onset_count(onset_times, grid)
+
+    # ---- 有音高 note（basic-pitch）----
+    if pitch_notes:
+        from . import pitch_notes as pn_mod
+
+        for stem, notes in pitch_notes.items():
+            if notes is None or not getattr(notes, "available", False):
+                continue
+            feats[f"n_pnote_{stem}"] = pn_mod.notes_per_bar(notes, grid)
+            feats[f"pitched_cov_{stem}"] = pn_mod.pitched_coverage_per_bar(notes, grid)
+        vocals_notes = pitch_notes.get("vocals")
+        if vocals_notes is not None and getattr(vocals_notes, "available", False):
+            # **人声活动的新口径**（设计文档 §3.4 / §9-A.3 的坏探测器替换件）：
+            # 能量 VAD 用相对 dB 阈值，vocals 轨近乎静音时底噪也超阈 ——
+            # n=40 实测把 10/12 首器乐曲判成人声曲。改用"有音高 note 的时间覆盖率"，
+            # 纯泄漏/底噪不会被 basic-pitch 判成 note，没有这个失败模式。
+            feats["vocal_pitched_ratio"] = feats["pitched_cov_vocals"]
+
+    feats["voiced_ratio"] = np.asarray(vocal_act, dtype=float)   # 兼容字段（已知不可靠）
+    feats["n_onset_merged"] = merged_onset_count(
+        onset_times, grid, keys=tuple(k for k in BASE_STEMS if k in onset_times))
     feats.update(riff_similarity(stem_audio.get("other"), sr, grid))
     feats["sil_run"] = silence_runs(y_mix if y_mix is not None else stem_audio.get("other"),
                                     sr, grid)
     feats["hf_ratio"] = high_freq_ratio(y_mix if y_mix is not None else stem_audio.get("other"),
                                         sr, grid)
     return feats
+
+
+def _count_per_bar(t: np.ndarray, grid) -> np.ndarray:
+    counts = np.zeros(grid.n_bars, dtype=float)
+    for bar in range(1, grid.n_bars + 1):
+        t0 = grid.bar_start(bar)
+        counts[bar - 1] = float(np.sum((t >= t0) & (t < t0 + grid.bar_duration(bar))))
+    return counts

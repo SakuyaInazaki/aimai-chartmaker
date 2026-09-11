@@ -15,6 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.audio_analysis import features, intensity, onsets, quantize, stemplan, tracks  # noqa: E402
+from tools.audio_analysis import pitch_notes as pn_mod  # noqa: E402
+from tools.audio_analysis import stems as stems_mod  # noqa: E402
 from tools.audio_analysis.grid import (  # noqa: E402
     BpmChange, Grid, check_offset, offset_verdict, parse_bpm_changes,
 )
@@ -71,6 +73,7 @@ class FakeSeg:
         self.chorus_index = kw.get("chorus_index")
         self.skeleton_stem = ""
         self.accent_stems = []
+        self.sparse_accents = []
         self.accent_share = {}
         self.plan_evidence = []
         self.primary_stem = ""       # 兼容字段（v0.2）
@@ -971,3 +974,291 @@ def test_pitched_mask_separates_tone_from_noise():
     noise = synth_clicks(np.array([0.0]), duration=dur, decay=0.5)
     assert bool(tracks.pitched_mask(tone, np.array([0.2]), sr)[0])
     assert not bool(tracks.pitched_mask(noise, np.array([0.0]), sr)[0])
+
+
+# ---------------- 12. v0.5 分轨细化：六路 / 有音高 note / fx 瞬态 ----------------
+
+
+def test_stems_model_registry_and_dir_naming():
+    """六路模型多两轨；`htdemucs` 的目录名必须保持历史路径（已有缓存不能失效）。"""
+    assert stems_mod.stems_for("htdemucs") == ("drums", "bass", "other", "vocals")
+    assert stems_mod.stems_for("htdemucs_6s") == (
+        "drums", "bass", "other", "vocals", "guitar", "piano")
+    assert stems_mod.stems_for("不认识的模型") == stems_mod.STEM_NAMES
+    root = Path("/x/y")
+    assert stems_mod.stems_dir_for(root, "htdemucs") == root / "stems"
+    assert stems_mod.stems_dir_for(root, "htdemucs_6s") == root / "stems_htdemucs_6s"
+
+
+def test_compact_stem_write_is_mono_22k_pcm16(tmp_path):
+    import soundfile as sf
+
+    arr = np.column_stack([np.sin(np.linspace(0, 40, 44100)),
+                           np.sin(np.linspace(0, 40, 44100))]).astype(np.float32)
+    p = tmp_path / "s.wav"
+    stems_mod._write_stem(p, arr, 44100, compact=True)
+    info = sf.info(str(p))
+    assert info.samplerate == stems_mod.COMPACT_SR
+    assert info.channels == 1
+    assert info.subtype == "PCM_16"
+
+
+def _hf_burst(times, duration, sr=SR, freq=8000.0, dur=0.02):
+    """高频短爆（风铃 / crash 的代理）。"""
+    y = np.zeros(int(round(duration * sr)), dtype=np.float32)
+    n = int(round(dur * sr))
+    env = np.exp(-np.linspace(0, 5, n))
+    t = np.arange(n) / sr
+    tone = (np.sin(2 * np.pi * freq * t) * env).astype(np.float32)
+    for tt in np.atleast_1d(times):
+        i = int(round(float(tt) * sr))
+        if 0 <= i < len(y) - n:
+            y[i:i + n] += tone
+    return y
+
+
+def test_transient_fx_finds_high_band_events():
+    times = np.array([0.5, 1.5, 2.5, 3.5])
+    y = _hf_burst(times, 4.5)
+    tr = onsets.transient_fx(y, sr=SR)
+    assert tr.heuristic is True
+    assert tr.count >= 3
+    for t in times[:3]:
+        assert np.min(np.abs(tr.times - t)) < 0.06
+
+
+def test_transient_fx_ignores_low_frequency_only_events():
+    """低频瞬态（底鼓）不该进 `fx` —— 相对门要求高频占比够高。"""
+    t = np.arange(int(4.0 * SR)) / SR
+    y = np.zeros_like(t, dtype=np.float32)
+    for tt in (0.5, 1.5, 2.5):
+        m = (t >= tt) & (t < tt + 0.08)
+        y[m] += (np.sin(2 * np.pi * 60.0 * t[m])
+                 * np.exp(-12 * (t[m] - tt))).astype(np.float32)
+    assert onsets.transient_fx(y, sr=SR).count <= 1
+
+
+def test_transient_fx_empty_input():
+    assert onsets.transient_fx(np.zeros(0), sr=SR).count == 0
+
+
+# ---- pitch_notes（不依赖 .venv-pitch，只测纯 numpy 侧）----
+
+
+def _pn(on, off, pit, conf=None):
+    on = np.asarray(on, dtype=float)
+    return pn_mod.PitchNotes(
+        "vocals", on, np.asarray(off, dtype=float), np.asarray(pit, dtype=float),
+        np.asarray(conf if conf is not None else np.full(on.size, 0.6), dtype=float))
+
+
+def test_pitch_notes_dict_roundtrip():
+    a = _pn([0.0, 1.0], [0.5, 1.5], [60, 64], [0.9, 0.3])
+    b = pn_mod.PitchNotes.from_dict(a.to_dict())
+    assert b.count == 2
+    assert np.allclose(b.onsets, a.onsets)
+    assert np.allclose(b.pitches, a.pitches)
+    assert b.available is True
+
+
+def test_pitch_notes_unavailable_is_empty_not_crashing():
+    u = pn_mod.PitchNotes.unavailable("vocals", "没装")
+    assert u.count == 0 and u.available is False and "没装" in u.error
+    assert u.strong_mask().size == 0
+
+
+def test_lead_mask_keeps_top_voice_only():
+    """一个三音和弦只留最高音（basic-pitch 是复音转录器，不筛会把候选池撑爆）。"""
+    n = _pn([0.0, 0.0, 0.0, 1.0], [0.9, 0.9, 0.9, 1.9], [60, 64, 67, 72])
+    m = pn_mod.lead_mask(n)
+    assert list(m) == [False, False, True, True]
+    assert pn_mod.filtered(n, lead_only=True).count == 2
+
+
+def test_filtered_by_confidence_and_duration():
+    n = _pn([0.0, 1.0, 2.0], [0.05, 1.8, 2.8], [60, 62, 64], [0.9, 0.2, 0.8])
+    assert pn_mod.filtered(n, min_confidence=0.5).count == 2
+    assert pn_mod.filtered(n, min_duration_sec=0.1).count == 2
+
+
+def test_pitched_coverage_per_bar_is_union_not_sum():
+    """和声/复音会重叠 —— 覆盖率必须按区间**并集**算，否则会超过 1。"""
+    g = Grid(bpm=120.0, first=0.0, beats_per_bar=4, duration=4.0)   # 1 小节 = 2s
+    n = _pn([0.0, 0.0, 0.5], [1.0, 1.0, 1.0], [60, 64, 67])
+    cov = pn_mod.pitched_coverage_per_bar(n, g)
+    assert 0.49 < cov[0] < 0.51
+    assert cov.max() <= 1.0
+
+
+def test_notes_per_bar_counts_by_onset():
+    g = Grid(bpm=120.0, first=0.0, beats_per_bar=4, duration=8.0)
+    n = _pn([0.1, 0.2, 2.5], [0.3, 0.4, 2.9], [60, 62, 64])
+    npb = pn_mod.notes_per_bar(n, g)
+    assert npb[0] == 2 and npb[1] == 1
+
+
+def test_as_activity_matches_note_intervals():
+    n = _pn([0.0, 2.0], [1.0, 3.0], [60, 62])
+    ft = np.arange(0, 4, 0.1)
+    act = pn_mod.as_activity(n, ft)["active"]
+    assert act[0] and not act[15] and act[21]
+
+
+def test_pitch_change_times_drops_repeated_pitch():
+    n = _pn([0.0, 0.5, 1.0], [0.4, 0.9, 1.4], [60, 60, 64])
+    assert np.allclose(pn_mod.pitch_change_times(n), [0.0, 1.0])
+
+
+def test_last_json_line_ignores_progress_noise():
+    assert pn_mod._last_json_line('Predicting MIDI...\n{"results": []}\n') == {
+        "results": []}
+    assert pn_mod._last_json_line("boom\n") is None
+
+
+def test_detect_batch_without_venv_returns_unavailable(tmp_path):
+    out = pn_mod.detect_batch({"vocals": tmp_path / "v.wav"},
+                              venv=tmp_path / "no-such-venv")
+    assert out["vocals"].available is False
+    assert ".venv-pitch" in out["vocals"].error
+
+
+# ---- melody / 轨集 ----
+
+
+def test_merge_times_dedupes_within_window():
+    m = tracks.merge_times([0.0, 0.01, 0.5], [0.02, 1.0])
+    assert np.allclose(m, [0.0, 0.5, 1.0])
+
+
+def test_build_melody_times_merges_lead_voices():
+    notes = {
+        "other": _pn([0.0, 0.0, 1.0], [0.9, 0.9, 1.9], [60, 67, 62]),
+        "piano": _pn([2.0], [2.5], [72]),
+    }
+    m = tracks.build_melody_times(notes, lead_only=True)
+    assert np.allclose(m, [0.0, 1.0, 2.0])
+    assert tracks.build_melody_times(notes, lead_only=False).size == 3
+
+
+def test_track_order_v5_is_still_four_tracks():
+    assert len(tracks.TRACK_ORDER_V5) == 4
+    assert tracks.TRACK_ORDER_V5 == ("drum", "vocal", "melody", "bass")
+    assert "fx" in tracks.JSON_ONLY_TRACKS
+
+
+def test_build_track_patterns_renders_melody_track():
+    g = Grid(bpm=120.0, first=0.0, beats_per_bar=4, duration=2.0)
+    div = {b: quantize.BarDivision(bar=b, division=8)
+           for b in range(1, g.n_bars + 1)}
+    times = {"drums": np.zeros(0), "vocals": np.zeros(0), "bass": np.zeros(0),
+             "melody": np.array([0.0, 1.0])}
+    slots = {"melody": {1: [0, 4]}}
+    out = tracks.build_track_patterns(g, div, times, slots, {}, None,
+                                      track_order=tracks.TRACK_ORDER_V5)
+    assert set(out) == set(tracks.TRACK_ORDER_V5)
+    assert out["melody"][1].pattern == "x...x..."
+
+
+# ---- features / stemplan 的 v0.5 扩展 ----
+
+
+def test_build_bar_features_adds_pitched_columns():
+    g = Grid(bpm=120.0, first=0.0, beats_per_bar=4, duration=8.0)
+    notes = {"vocals": _pn([0.0], [1.0], [60])}
+    feats = features.build_bar_features(
+        g, {}, SR, {"melody": np.array([0.1]), "fx": np.array([0.2]),
+                    "guitar": np.array([0.3])},
+        np.zeros(g.n_bars), pitch_notes=notes)
+    assert "n_pnote_vocals" in feats and "pitched_cov_vocals" in feats
+    assert "vocal_pitched_ratio" in feats
+    assert "n_onset_melody" in feats and "n_onset_fx" in feats
+    assert "n_onset_guitar" in feats
+
+
+def test_detect_stem_set_switches_to_v5():
+    assert stemplan.detect_stem_set({"n_onset_drums": np.zeros(4)}) == stemplan.STEMS
+    got = stemplan.detect_stem_set({f"n_onset_{k}": np.zeros(4)
+                                    for k in stemplan.STEMS_V5})
+    assert set(got) == set(stemplan.STEMS_V5)
+
+
+def _stem_feats_v5(n=32, **over):
+    f = _stem_feats(n)
+    for s in ("melody", "fx", "guitar", "piano"):
+        f[f"share_{s}"] = np.full(n, 0.1)
+        f[f"n_onset_{s}"] = np.full(n, 6.0 if s != "fx" else 3.0)
+        f[f"grid_fit_{s}"] = np.full(n, 0.9)
+        f[f"grid_fit_bar_{s}"] = np.full(n, 0.9)
+    f["vocal_pitched_ratio"] = np.full(n, 0.6)
+    f.update(over)
+    return f
+
+
+def test_fx_never_becomes_skeleton():
+    """`fx` 是点缀音的定义，任何情况下都不该当骨架。"""
+    feats = _stem_feats_v5(n_onset_drums=np.zeros(32), n_onset_fx=np.full(32, 99.0))
+    segs = [FakeSeg(1, 32, "interlude")]
+    out, _ = stemplan.plan_stems(segs, feats, _FakeGrid(32), 120.0)
+    assert out[0].skeleton_stem != "fx"
+
+
+def test_verse_accent_can_pick_piano():
+    """v0.5 标定：`piano` 的 lift 2.44 是非鼓轨最高 → 进 verse 的点缀候选。"""
+    feats = _stem_feats_v5(n_onset_other=np.full(32, 1.0),
+                           n_onset_piano=np.full(32, 9.0))
+    segs = [FakeSeg(1, 32, "verse")]
+    out, _ = stemplan.plan_stems(segs, feats, _FakeGrid(32), 120.0)
+    assert out[0].accent_stems[0] == "piano"
+
+
+def test_melody_never_enters_accent_ranking():
+    """`melody` 密度虚高（lift 1.61 全表最低）→ 只当候选池，不进 accent 排序。
+
+    实测依据：让它参与排序时 379 段里 232 段把它排成第一点缀，
+    「第一点缀落在实测 lift 前三」从 0.699 掉到 0.356（报告 §8.1）。
+    """
+    feats = _stem_feats_v5(n_onset_melody=np.full(32, 99.0))
+    for fn in ("verse", "chorus", "interlude", "intro", "pre_chorus", "quiet_chorus"):
+        out, _ = stemplan.plan_stems([FakeSeg(1, 32, fn)], feats, _FakeGrid(32), 120.0)
+        assert "melody" not in out[0].accent_stems, fn
+        assert out[0].skeleton_stem != "melody", fn
+
+
+def test_fx_is_sparse_rule_triggered_not_density_ranked():
+    """`fx` recall 0.043 但 precision 0.460 —— 按密度永远排不上，必须走专门规则。"""
+    feats = _stem_feats_v5()
+    out, _ = stemplan.plan_stems([FakeSeg(1, 32, "verse")], feats, _FakeGrid(32), 120.0)
+    assert "fx" not in out[0].accent_stems
+
+
+def test_lift_prior_downweights_dense_low_value_tracks():
+    prior = stemplan.lift_prior
+    assert prior("drums") == 1.0
+    assert prior("piano") > prior("other") > prior("vocals") > prior("melody")
+
+
+def test_plan_uses_pitched_ratio_when_available():
+    """人声活动优先读有音高覆盖率（能量 VAD 是 n=40 认定的坏探测器）。"""
+    feats = _stem_feats_v5(voiced_ratio=np.full(32, 1.0),
+                           vocal_pitched_ratio=np.full(32, 0.02))
+    segs = [FakeSeg(1, 32, "chorus")]
+    out, _ = stemplan.plan_stems(segs, feats, _FakeGrid(32), 120.0)
+    ev = " ".join(out[0].plan_evidence)
+    assert "vocal_pitched_ratio=0.02" in ev
+    assert "已知不可靠" in ev
+
+
+def test_fx_lights_up_as_sparse_accent_when_present():
+    """`fx` 不占 accent_stems 名额，走 `sparse_accents`。"""
+    feats = _stem_feats_v5(n_onset_fx=np.full(32, 2.0))
+    segs = [FakeSeg(1, 32, "final_chorus")]
+    out, _ = stemplan.plan_stems(segs, feats, _FakeGrid(32), 120.0)
+    assert out[0].sparse_accents == ["fx"]
+    assert "fx" not in out[0].accent_stems
+
+
+def test_fx_stays_dark_when_absent():
+    feats = _stem_feats_v5(n_onset_fx=np.zeros(32))
+    out, _ = stemplan.plan_stems([FakeSeg(1, 32, "verse")], feats,
+                                 _FakeGrid(32), 120.0)
+    assert out[0].sparse_accents == []

@@ -26,6 +26,10 @@ from pathlib import Path
 import numpy as np
 
 STEM_ORDER = ("drums", "bass", "other", "vocals")
+#: v0.5 的六路 stem（`out/calib/<曲名>/stems_htdemucs_6s/`）
+STEM_ORDER_6S = ("drums", "bass", "other", "vocals", "guitar", "piano")
+#: 跑过 basic-pitch 的 stem
+PITCH_STEMS = ("vocals", "other", "guitar", "piano", "bass")
 INOTE_KEY = "&inote_5="          # Master 难度
 
 
@@ -65,7 +69,9 @@ class SongBundle:
     analysis: dict = field(default_factory=dict)
     parse: object = None              # chart_analysis.simai_parser.ParseResult
     density: object = None            # chart_analysis.density.ChartDensity
-    onset_times: dict = field(default_factory=dict)   # {stem: np.ndarray(秒)}
+    onset_times: dict = field(default_factory=dict)   # {轨名: np.ndarray(秒)}
+    pitch_notes: dict = field(default_factory=dict)   # {stem: PitchNotes}（v0.5）
+    v5: dict = field(default_factory=dict)            # v0.5 侧的诊断信息
     components: dict = field(default_factory=dict)    # 五项强度分量（逐小节，未 Z 化）
     bar_intensity: np.ndarray = field(default_factory=lambda: np.zeros(0))
     bar_intensity_raw: np.ndarray = field(default_factory=lambda: np.zeros(0))
@@ -76,7 +82,95 @@ class SongBundle:
         return int(self.grid.n_bars) if self.grid is not None else 0
 
 
-def load_song(song_dir: Path, recompute_intensity: bool = True) -> SongBundle:
+def load_v5_tracks(song_dir: Path, bundle: "SongBundle",
+                   stem_audio4: dict | None = None) -> None:
+    """装载 v0.5 的新轨，写进 `bundle.onset_times` / `bundle.pitch_notes`。
+
+    新轨清单（全部只在标定里比较，**不改四路口径的任何既有数字**）：
+
+    | key | 含义 |
+    |---|---|
+    | `guitar` / `piano` | htdemucs_6s 新增两轨的**能量 onset** |
+    | `drums_6s` / `bass_6s` / `other_6s` / `vocals_6s` | 六路模型自己的四轨（与四路模型不同权重） |
+    | `fx` | 四路 `other` stem 的 **>4 kHz 瞬态**（风铃/crash/采样打击/FX） |
+    | `pnote_<stem>` | 该 stem 的 **basic-pitch 有音高 note onset**（全部声部） |
+    | `pnote_lead_<stem>` | 同上但只取**最高声部**（`lead_mask`） |
+    | `melody` | `other+guitar+piano` 的 **lead** note onset 合并去重 |
+    | `melody_all` | 同上但不筛声部 |
+    | `vocal_plus` | 四路 `vocals` 的能量 onset **∪** 人声有音高 note onset |
+    """
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from tools.audio_analysis import onsets as onsets_mod
+    from tools.audio_analysis import pitch_notes as pn_mod
+    from tools.audio_analysis import stems as stems_mod
+    from tools.audio_analysis import tracks as tracks_mod
+
+    song_dir = Path(song_dir)
+    info: dict = {"stems_6s": False, "pitch": False, "counts": {}}
+
+    # ---- fx：在四路的 other 上做（与既有四路口径同源，避免混入模型差异）----
+    y_other = (stem_audio4 or {}).get("other")
+    if y_other is None:
+        p = song_dir / "stems" / "other.wav"
+        if p.exists():
+            y_other, _ = stems_mod.load_stem_mono(p, sr=onsets_mod.ANALYSIS_SR)
+    if y_other is not None:
+        bundle.onset_times["fx"] = onsets_mod.transient_fx(
+            y_other, sr=onsets_mod.ANALYSIS_SR, hop=onsets_mod.HOP).times
+
+    # ---- 六路 stem 的能量 onset ----
+    sd6 = stems_mod.stems_dir_for(song_dir, "htdemucs_6s")
+    if sd6.exists():
+        for s in STEM_ORDER_6S:
+            p = sd6 / f"{s}.wav"
+            if not p.exists():
+                continue
+            y, _ = stems_mod.load_stem_mono(p, sr=onsets_mod.ANALYSIS_SR)
+            t = onsets_mod.detect_onsets(y, s, sr=onsets_mod.ANALYSIS_SR,
+                                         hop=onsets_mod.HOP).times
+            bundle.onset_times[s if s in ("guitar", "piano") else f"{s}_6s"] = t
+        info["stems_6s"] = True
+
+    # ---- basic-pitch 的有音高 note ----
+    cache = sd6 / "pitch_notes.json"
+    if cache.exists():
+        raw = json.loads(cache.read_text(encoding="utf-8"))
+        for d in raw.get("results", []):
+            n = pn_mod.PitchNotes.from_dict(d)
+            if not n.available:
+                continue
+            bundle.pitch_notes[n.stem] = n
+            bundle.onset_times[f"pnote_{n.stem}"] = np.asarray(n.onsets, dtype=float)
+            lead = pn_mod.filtered(n, lead_only=True)
+            bundle.onset_times[f"pnote_lead_{n.stem}"] = np.asarray(lead.onsets,
+                                                                    dtype=float)
+        info["pitch"] = bool(bundle.pitch_notes)
+
+    if bundle.pitch_notes:
+        bundle.onset_times["melody"] = tracks_mod.build_melody_times(
+            bundle.pitch_notes, lead_only=True)
+        bundle.onset_times["melody_all"] = tracks_mod.build_melody_times(
+            bundle.pitch_notes, lead_only=False)
+        # 置信度筛选变体：basic-pitch 的 confidence ∈ [0,1]，用来把 melody 的候选池
+        # 压到与鼓轨同量级（不筛的话密度是鼓的 2 倍，随机基线被抬爆）
+        for c in (0.5, 0.6, 0.7):
+            bundle.onset_times[f"melody_c{int(c * 100)}"] = tracks_mod.build_melody_times(
+                bundle.pitch_notes, lead_only=True, min_confidence=c)
+        v = bundle.pitch_notes.get("vocals")
+        if v is not None and "vocals" in bundle.onset_times:
+            bundle.onset_times["vocal_plus"] = tracks_mod.merge_times(
+                bundle.onset_times["vocals"], v.onsets)
+
+    info["counts"] = {k: int(np.size(v)) for k, v in bundle.onset_times.items()}
+    bundle.v5 = info
+
+
+def load_song(song_dir: Path, recompute_intensity: bool = True,
+              with_v5: bool = True) -> SongBundle:
     """装载一首曲子的全部标定输入。"""
     import sys
 
@@ -157,6 +251,9 @@ def load_song(song_dir: Path, recompute_intensity: bool = True) -> SongBundle:
         if n:
             bundle.components["_recompute_max_abs_diff"] = np.array(
                 [float(np.max(np.abs(ires.bar_raw[:n] - bundle.bar_intensity_raw[:n])))])
+
+    if with_v5:
+        load_v5_tracks(song_dir, bundle, stem_audio4=stem_audio)
     return bundle
 
 

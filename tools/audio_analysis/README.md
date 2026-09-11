@@ -1,4 +1,4 @@
-# tools/audio_analysis — 歌曲分析单生成器（原型 v0.4）
+# tools/audio_analysis — 歌曲分析单生成器（原型 v0.5）
 
 把一首 mp3 变成 **LLM 可直接消费的结构化「歌曲分析单」**：段落划分（日式标签）、
 逐小节强度与建议密度、逐小节四轨 onset 网格串、逐段切轨建议。对应
@@ -8,7 +8,69 @@
 > **前提**：BPM 与 offset（simai `&first`）**由用户给定**。本工具**不做节拍追踪**，
 > 只对用户给的 offset 做一致性校验并**如实报告差值，绝不覆盖用户值**。
 
-## 0. v0.4 变更一览（落地 **40 首**官方音频配对标定的结论，2026-09-11 第二轮）
+## 0. v0.5 变更一览（**分轨细化**，2026-09-12）
+
+**起因（用户 2026-09-12）**：「采样的话不能只有人声和鼓点两种」——官方谱大量踩
+合成器主旋律、钢琴、吉他 riff、采样音效，四路管线把它们全塞在 Demucs 的 `other`
+一路里；而**能量 onset 抓不到长音 / 分解和弦 / legato 换音**。n=40 标定的遗留数字
+（`docs/research/audio-chart-calibration-n40.md` §5.2）正好对上：`other` recall 只有
+0.267，**16.8% 的官方 note 什么 stem 都不落**。
+
+| # | 变更 | 修法 |
+|---|------|------|
+| **A** | **六路分离** | `stems.py` 支持 **`htdemucs_6s`**（MIT，+`guitar`/`piano`）。输出目录**按模型名分开**：`htdemucs` 仍写 `<out>/stems/`（已有 40 首缓存不失效），六路写 `<out>/stems_htdemucs_6s/`。新增 `--compact-stems`（单声道 22.05 kHz PCM_16，体积 1/8，下游口径无损） |
+| **B** | **有音高 note 检测** | 新模块 `pitch_notes.py` = **basic-pitch**（Apache-2.0）。装在**独立的 `.venv-pitch`**（uv + python 3.11），主管线走**子进程 + JSON**，结果缓存在 `stems_htdemucs_6s/pitch_notes.json` |
+| **C** | **`fx` 点缀音/瞬态轨** | `onsets.transient_fx()`：`other` stem 上只算 **>4 kHz 频带**的谱通量 + 高频占比相对门 → 风铃 / crash / 采样打击 / FX |
+| **D** | **展示轨集换件** | `drum / vocal / bass / hook` → **`drum / vocal / melody / bass`**（仍是 4 条，`tracks.TRACK_ORDER_V5`）。`melody` = other+guitar+piano 的**有音高 note onset（最高声部）**合并；`vocal` = 能量 onset **∪** 人声有音高 note。`fx` / `hook` / `guitar` / `piano` / `hihat` **只进 JSON 与逐小节计数列** |
+| **E** | **人声活动判据换件** | 新特征 **`vocal_pitched_ratio`**（人声有音高 note 的时间覆盖率）取代能量 VAD `voiced_ratio`；器乐/人声曲的判定改用 `share_vocals < 0.10 ∧ vocal_pitched_ratio < 0.30` |
+
+**为什么 E 是必须的**：n=40 §5.3 实测能量 VAD **把 10/12 首器乐曲判成人声曲**
+（《超絶！Superlative》的 `voiced_ratio = 1.000` 而 `share_vocals = 0.003`）——
+它用**相对 dB 阈值**，vocals 轨近乎静音时底噪也超阈。有音高 note 没有这个失败模式：
+纯泄漏底噪不会被 basic-pitch 判成 note。
+
+**标定结论**（40 首实跑）见 `docs/research/stem-refinement-n40.md`。
+
+### 0.a `.venv-pitch` 的装法与用法
+
+py3.12 的主 `.venv` 里 **basic-pitch 装不上**（`[tf]` 钉死 `tensorflow-macos<2.15.1`
+无 cp312 wheel；`[onnx]` 在 py3.12 解析 `narwhals` 时 `resolution-too-deep`）。
+v0.5 的解法是 **uv 起一个独立的 py3.11 venv**（uv 会自动下载独立 Python，不动系统）：
+
+```bash
+pip install uv                 # 或 brew install uv
+cd <仓库根>
+uv venv .venv-pitch --python 3.11
+uv pip install --python .venv-pitch "basic-pitch[onnx]" "setuptools<81"
+```
+
+⚠️ **`setuptools<81` 是硬性的**：`resampy`（basic-pitch 依赖）仍 `import pkg_resources`，
+setuptools ≥ 81 已经把它删了，不钉版本会在 `import basic_pitch.inference` 时直接炸。
+
+装好后主管线**自动发现**（仓库根 `.venv-pitch`），无需额外参数；
+也可用 `--pitch-venv <路径>` 或环境变量 `CHARTMAKER_PITCH_VENV` / `CHARTMAKER_PITCH_PYTHON` 指定。
+没装时管线**自动跳过**并退回 v0.4 的四轨展示集（`pitch_notes.enabled = false`）。
+
+**后端**：Darwin 上 basic-pitch 默认走 CoreML。🧪 实测 ONNX 与 CoreML 在合成音上
+**note 事件逐位相同**（同样 4 个音、onset/offset/pitch/confidence 全一致），
+但 CoreML 进程退出时会抛 `libc++abi: recursive_mutex lock failed`（coremltools 的
+atexit 问题），批量子进程调用时这个非零退出码会污染错误处理 →
+**默认固定 ONNX**，`--pitch-backend coreml` 可切。
+
+### 0.b v0.5 的实测耗时（Apple M4 / 16 GB / macOS 26）
+
+| 环节 | 耗时 | 备注 |
+|---|---|---|
+| `htdemucs_6s` 分离（MPS） | **12.5–18.9 s / 曲**，40 首中位 ≈ 14 s | 曲长 100–170 s → **RTF ≈ 0.10–0.13**，与四路 `htdemucs` 同量级（六路只多两个输出头） |
+| basic-pitch（5 条 stem / 曲，ONNX 子进程） | **6.6–32 s / 曲** | 一次子进程跑完 5 条（模型只加载一次）；耗时随 stem 的音符密度涨 |
+| `transient_fx`（纯 DSP） | < 0.2 s / 曲 | |
+| 整条 v0.5 管线（复用缓存 stems + pitch） | RTF **0.077** | 冷跑（含六路分离 + basic-pitch）RTF **0.22** |
+
+⚠️ **磁盘**：六路 stem 若按 44.1 kHz 立体声落盘，40 首约 6 GB。用 `--compact-stems`
+（单声道 22.05 kHz PCM_16）压到约 1.5 GB —— 这正是 `load_stem_mono` / librosa onset /
+basic-pitch 实际消费的格式（basic-pitch 内部也重采样到 22050 Hz 单声道），**分析口径无损**。
+
+## 0.0 v0.4 变更一览（落地 **40 首**官方音频配对标定的结论，2026-09-11 第二轮）
 
 依据：`docs/research/audio-chart-calibration-n40.md`（R1–R4）。用户在原 8 首外再提供 32 首，
 样本从 n=8 扩到 **n=40**（定数 13.0–14.5、BPM 100–260、六类 `&genre`）。
@@ -27,7 +89,7 @@
 消费，那两处**从未标定**——`loudness`/`voiced` 归零只代表它们预测不了密度。
 新权重让 `I_bar` 实质变成**谱通量曲线**（flux 占 74%），对响度不敏感。
 
-## 0.0 v0.3 变更一览（落地 8 首官方音频配对标定的结论，2026-09-11）
+## 0.1 v0.3 变更一览（落地 8 首官方音频配对标定的结论，2026-09-11）
 
 依据：`docs/research/audio-chart-calibration.md`（R1–R11）+ 主会话裁定。
 
@@ -43,7 +105,7 @@
 **没改的**（v0.3 当时）：`intensity.py` 的融合权重——n=8 的标定结论是维持初值。
 **⚠️ 这条已被 v0.4 推翻**：n=40 上三条判据全过，权重已换，见上面的 §0-A。
 
-## 0.1 v0.2 变更一览（对 v0.1 的五项返工）
+## 0.2 v0.2 变更一览（对 v0.1 的五项返工）
 
 | # | v0.1 的问题（主会话验收） | v0.2 的修法 | 依据 |
 |---|--------------------------|-------------|------|
@@ -79,7 +141,10 @@
 | `--level` | **新增**，目标定数（如 `13.5`）。给了才输出 note 总数区间（知识 004）与该定数的官方均值 note/小节；缺省用全库量级 9.0 |
 | `--bpm-changes "33:180,65:155"` | 变速点（实验性，见 §7 限制） |
 | `--beats-per-bar` | 每小节拍数，默认 4 |
-| `--model` / `--device` | Demucs 模型与推理设备 |
+| `--model` / `--device` | Demucs 模型与推理设备。**v0.5 起可用 `htdemucs_6s`**（+guitar/piano，输出写 `stems_htdemucs_6s/`，不覆盖已有四路缓存） |
+| `--compact-stems` | **v0.5**，stem 落盘写单声道 22.05 kHz PCM_16（体积 1/8，下游口径无损） |
+| `--no-pitch-notes` | **v0.5**，跳过 basic-pitch（`.venv-pitch` 缺席时自动跳过，无需此参数） |
+| `--pitch-venv` / `--pitch-backend` | **v0.5**，basic-pitch 的 venv 路径与后端（`onnx` 默认 / `coreml` / `tf` / `tflite`） |
 | `--divisions` | 候选分音扫描顺序，默认 `4,8,12,16,24,32` |
 | `--div-outlier-ratio` | **新增**，定 div 时允许多少比例的 onset 超出 τ。**默认 0.0 = 严格照 v2 的 max 残差口径**；调到 0.1 能让分音直方图重新有信息量，但那是偏离调研口径的做法（见 §6） |
 | `--no-fine-div` | 彻底禁止 `{32}`（默认已有红线） |
@@ -100,10 +165,11 @@
 |------|------|
 | `grid.py` | 由 BPM+first 构造小节/拍/细分网格；变速点；**offset 校验**（纯 numpy） |
 | `decode.py` | ffmpeg mp3→44.1k WAV；ffprobe 读时长与容器 `start_time` |
-| `stems.py` | Demucs v4 四轨分离（MPS 失败自动回退 CPU），记录设备与耗时 |
-| `onsets.py` | 逐 stem onset 检测；鼓件频带启发式分类；人声 VAD |
+| `stems.py` | Demucs v4 分离（**四路 `htdemucs` / 六路 `htdemucs_6s`**，按模型名分目录；MPS 失败自动回退 CPU；`compact` 落盘），记录设备与耗时 |
+| `onsets.py` | 逐 stem onset 检测；鼓件频带启发式分类；人声 VAD；**`transient_fx`（>4 kHz 点缀音瞬态）** |
+| **`pitch_notes.py`** | **basic-pitch 有音高 note 事件**（子进程跑 `.venv-pitch`）；逐小节 note 数 / 覆盖率 / 最高声部筛选 / 结果缓存 |
 | `quantize.py` | **拍同步重采样 + 逐小节唯一 div + τ(d) + 三连判别 + {32} 红线** |
-| `tracks.py` | **四条逻辑轨的构造与网格串渲染**（`X x - .`）；人声"有音高"判定 |
+| `tracks.py` | **四条逻辑轨的构造与网格串渲染**（`X x - .`）；`melody` 轨合并；人声"有音高"判定 |
 | `features.py` | **逐小节特征表**（v2 §4.1 清单） |
 | `structure.py` | **边界三路投票 + 日式标签词表 + pre_chorus/chorus/final_chorus/rest 派生** |
 | `intensity.py` | **五项融合强度 + 高潮五票 + 强度→建议密度映射** |
@@ -116,7 +182,9 @@
 ```
 out/<song>/
   track.44k.wav          # ffmpeg 统一解码产物（后续全部分析的时间基准）
-  stems/{drums,bass,other,vocals}.wav
+  stems/{drums,bass,other,vocals}.wav               # --model htdemucs（默认）
+  stems_htdemucs_6s/{drums,bass,other,vocals,guitar,piano}.wav   # --model htdemucs_6s
+  stems_htdemucs_6s/pitch_notes.json                # basic-pitch 结果缓存（v0.5）
   song_analysis.json     # 全部机器可读结果（旧名 analysis.json 同时写出，保持兼容）
   song_sheet.md          # 给 LLM/人看的中文分析单（旧名 song-sheet.md 同时写出）
   plot.png               # 强度曲线 + 段落 + stem 活动 + 逐小节 div（人工复核用）
@@ -124,15 +192,21 @@ out/<song>/
 
 ### 4.1 四条逻辑轨与字符集
 
-| 轨 | 来源 stem | `X` | `x` | `-` |
-|----|-----------|-----|-----|-----|
-| `drum` | drums | kick | snare / 其他鼓件 | — |
-| `vocal` | vocals | **有音高且强**的 onset | onset | **延音持续**（VAD 有声但无新 onset） |
-| `bass` | bass | 强 onset（≥ 本轨 P70） | onset | — |
-| `hook` | other | 强 onset | onset | — |
+**v0.5（有 `.venv-pitch` 时的默认，`TRACK_ORDER_V5`）**
 
-`.` = 空。**字符集只有这四个**。hihat 不单独给串（密集段里它与 kick 的串常常
-完全一样），只在逐小节表给一个计数列。串长 = **该小节的 div**，四轨共用，可纵向对齐读。
+| 轨 | 来源 | `X` | `x` | `-` |
+|----|------|-----|-----|-----|
+| `drum` | drums stem 能量 onset | kick | snare / 其他鼓件 | — |
+| `vocal` | vocals 能量 onset **∪** 人声有音高 note onset | 强且**有音高**（basic-pitch 判定） | onset | **延音持续**（有音高 note 的持续时间） |
+| **`melody`** | other + guitar + piano 的**有音高 note onset（最高声部）** | 强 onset | onset | — |
+| `bass` | bass stem 能量 onset | 强 onset（≥ 本轨 P70） | onset | — |
+
+**v0.4（无 `.venv-pitch` 时的兜底，`TRACK_ORDER`）**：`drum` / `vocal` / `bass` / `hook`（other 全带能量 onset）。
+
+`.` = 空。**字符集只有这四个**。**轨数上限 4 是硬约束**（调研 v2 §5.2(d)）——
+`fx`（>4 kHz 瞬态）、`hook`（other 全带能量 onset）、`guitar` / `piano`、`hihat`
+**都不铺网格串**，只在逐小节表给计数列（铺 8 条轨会诱导 LLM 采密，违反知识 005）。
+串长 = **该小节的 div**，四轨共用，可纵向对齐读。
 
 ### 4.2 `song_analysis.json` schema（v0.2）
 

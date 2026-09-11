@@ -27,6 +27,10 @@ STEM_ONSET_PARAMS: dict[str, dict] = {
     "other": dict(delta=0.08, wait=3, pre_max=3, post_max=3, pre_avg=12, post_avg=12),
     # 人声：连奏多、颤音会误触发，最保守
     "vocals": dict(delta=0.14, wait=6, pre_max=4, post_max=4, pre_avg=16, post_avg=16),
+    # 吉他（htdemucs_6s）：拨弦瞬态明显，与 other 同档
+    "guitar": dict(delta=0.08, wait=3, pre_max=3, post_max=3, pre_avg=12, post_avg=12),
+    # 钢琴（htdemucs_6s）：起音干脆但踏板延音长，稍保守一点
+    "piano": dict(delta=0.10, wait=4, pre_max=3, post_max=3, pre_avg=12, post_avg=12),
     "_default": dict(delta=0.08, wait=3, pre_max=3, post_max=3, pre_avg=12, post_avg=12),
 }
 
@@ -199,6 +203,76 @@ def drum_components(
             heuristic=True,
         )
     return out
+
+
+#: `fx`（点缀音/瞬态）轨的频带下限。风铃、crash/china、采样打击、riser 尾端、
+#: 电子音效的能量重心都在 4 kHz 以上；4 kHz 以下会被 snare 体与人声齿音污染。
+FX_BAND_LO = 4000.0
+
+
+def transient_fx(
+    y: np.ndarray,
+    sr: int = ANALYSIS_SR,
+    hop: int = HOP,
+    n_fft: int = N_FFT,
+    lo: float = FX_BAND_LO,
+    delta: float = 0.10,
+    wait: int = 3,
+    min_hf_ratio: float = 0.35,
+) -> OnsetTrack:
+    """高频瞬态轨 `fx`：在 `other` stem 上检出 >`lo` Hz 的瞬态事件。
+
+    **动机（用户 2026-09-12）**：官方谱大量踩风铃 / crash / 采样打击 / FX 音效，
+    这些在四路管线里全被塞进 `other`，而 `other` 的全带 onset 包络被合成器/吉他的
+    持续能量压住，高频小瞬态检不出来。
+
+    **做法**：只在 >`lo` Hz 的频带上算谱通量（半波整流差分），再 peak-pick；
+    另外要求该 onset 处的**高频能量占比 ≥ `min_hf_ratio`**，否则它只是一个低频
+    事件的泛音溢出（否则 `fx` 会变成 `other` onset 的副本）。
+
+    ⚠️ **这是启发式，不是音效分类器**：它区分不了"风铃"和"吉他拨片噪声"，
+    只保证"这个时刻有一个明显的高频瞬态"。结果标 `heuristic=True`。
+    """
+    import librosa
+
+    if y is None or np.size(y) == 0:
+        return OnsetTrack("fx", np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0),
+                          heuristic=True)
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    hi_sel = freqs >= lo
+    ft = frame_times(S.shape[1], sr, hop)
+    if not hi_sel.any() or S.shape[1] < 3:
+        return OnsetTrack("fx", np.zeros(0), np.zeros(0), np.zeros(0), ft,
+                          heuristic=True)
+
+    hi = S[hi_sel, :]
+    flux = np.zeros(S.shape[1])
+    flux[1:] = np.sqrt(np.sum(np.square(np.maximum(0.0, np.diff(hi, axis=1))), axis=0))
+    peak = float(np.max(flux))
+    if peak <= 0:
+        return OnsetTrack("fx", np.zeros(0), np.zeros(0), np.zeros(0), ft,
+                          heuristic=True)
+    env = flux / peak
+
+    frames = librosa.onset.onset_detect(
+        onset_envelope=env, sr=sr, hop_length=hop, backtrack=False, units="frames",
+        normalize=False, delta=delta, wait=wait, pre_max=3, post_max=3,
+        pre_avg=12, post_avg=12,
+    )
+    frames = np.asarray(frames, dtype=int)
+    if frames.size == 0:
+        return OnsetTrack("fx", np.zeros(0), np.zeros(0), env, ft, heuristic=True)
+
+    # 相对门：高频能量必须在该帧总能量里占到 min_hf_ratio，否则是低频事件的溢出
+    hi_e = hi.sum(axis=0)
+    tot_e = S.sum(axis=0) + 1e-12
+    ratio = hi_e / tot_e
+    keep = ratio[frames] >= min_hf_ratio
+    frames = frames[keep]
+    times = librosa.frames_to_time(frames, sr=sr, hop_length=hop)
+    strengths = env[frames] if frames.size else np.zeros(0)
+    return OnsetTrack("fx", times, strengths, env, ft, heuristic=True)
 
 
 def vocal_activity(

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.calibration import chartpair as cp          # noqa: E402
 from tools.calibration import ending as ending_mod      # noqa: E402
 from tools.calibration import stemhit                   # noqa: E402
+from tools.calibration import stemrefine                # noqa: E402
 from tools.calibration import weights as weights_mod    # noqa: E402
 
 
@@ -486,3 +487,120 @@ def test_plan_v02_intro_uses_energy_share():
         bf[f"grid_fit_bar_{st}"] = np.full(n, 0.9)
     segs = [{"start_bar": 1, "end_bar": 8, "function": "intro"}]
     assert strata_mod.plan_v02_primary(segs, bf) == ["hook"]
+
+
+# ---------------------------------------------------------------------------
+# v0.5 分轨细化：收回统计与池化汇总
+# ---------------------------------------------------------------------------
+
+
+def test_explain_breakdown_base_none_ignores_new_tracks():
+    """`none` 必须只按四路基线算 —— 否则和 n=40 报告的 16.8% 不可比。"""
+    ev = np.array([0.0, 1.0, 2.0, 3.0])
+    tracks = {"drums": np.array([0.0]), "bass": np.zeros(0),
+              "other": np.zeros(0), "vocals": np.zeros(0),
+              "melody": np.array([1.0, 2.0])}
+    b = stemhit.explain_breakdown(ev, tracks, tol=0.03)
+    assert b["none"] == pytest.approx(0.75)          # 四路口径
+    assert b["none_all_tracks"] == pytest.approx(0.25)
+    assert b["per_track"]["melody"] == pytest.approx(0.5)
+
+
+def test_recovery_breakdown_counts_only_previously_unexplained():
+    ev = np.array([0.0, 1.0, 2.0, 3.0])
+    tracks = {"drums": np.array([0.0]), "bass": np.zeros(0),
+              "other": np.zeros(0), "vocals": np.zeros(0),
+              # melody 覆盖 1.0（未解释）与 0.0（已被 drums 解释，不算收回）
+              "melody": np.array([0.0, 1.0]),
+              "fx": np.array([2.0])}
+    r = stemhit.recovery_breakdown(ev, tracks, new_tracks=("melody", "fx"), tol=0.03)
+    assert r["n_unexplained_base"] == 3
+    assert r["share_unexplained_base"] == pytest.approx(0.75)
+    assert r["recovered"] == pytest.approx(2 / 3)
+    assert r["by_track"]["melody"] == pytest.approx(1 / 3)
+    assert r["by_track"]["fx"] == pytest.approx(1 / 3)
+    assert r["by_track_exclusive"]["fx"] == pytest.approx(1 / 3)
+    assert r["still_none"] == pytest.approx(0.25)
+
+
+def test_recovery_breakdown_empty_events():
+    assert stemhit.recovery_breakdown(np.zeros(0), {}, new_tracks=()) == {}
+
+
+def _fake_song(name, ev, tracks, tol=0.03):
+    gs = {k: stemhit.hit_stat(ev, v, tol, span_sec=10.0).to_dict()
+          for k, v in tracks.items()}
+    return {
+        "name": name,
+        "global_stem": gs,
+        "recovery": stemhit.recovery_breakdown(
+            ev, tracks, new_tracks=("melody", "fx"), tol=tol),
+        "profile": {"vocal_song_by_share": True},
+        "segments": [{"song": name, "function": "chorus", "n_events": int(ev.size),
+                      "per_track": gs, "best_stem_base4": "drums",
+                      "best_stem_v5": "drums"}],
+    }
+
+
+def test_pool_tracks_is_event_weighted():
+    ev = np.array([0.0, 1.0, 2.0, 3.0])
+    tr = {"drums": np.array([0.0, 1.0]), "bass": np.zeros(0),
+          "other": np.zeros(0), "vocals": np.zeros(0),
+          "melody": np.array([2.0]), "fx": np.zeros(0)}
+    pooled = stemrefine.pool_tracks([_fake_song("a", ev, tr), _fake_song("b", ev, tr)])
+    assert pooled["drums"]["n_events"] == 8
+    assert pooled["drums"]["recall"] == pytest.approx(0.5)
+    assert pooled["melody"]["recall"] == pytest.approx(0.25)
+
+
+def test_pool_recovery_aggregates_and_lifts():
+    ev = np.array([0.0, 1.0, 2.0, 3.0])
+    tr = {"drums": np.array([0.0]), "bass": np.zeros(0), "other": np.zeros(0),
+          "vocals": np.zeros(0), "melody": np.array([1.0, 2.0]), "fx": np.zeros(0)}
+    songs = [_fake_song("a", ev, tr)]
+    pt = stemrefine.pool_tracks(songs)
+    out = stemrefine.pool_recovery(
+        songs, chances={k: v.get("chance_recall") for k, v in pt.items()})
+    assert out["n_unexplained_base"] == 3
+    assert out["recovered"] == pytest.approx(2 / 3, abs=1e-4)
+    assert out["by_track"]["melody"] == pytest.approx(2 / 3, abs=1e-4)
+    assert out["by_track_lift"]["melody"] is not None
+
+
+def test_pool_by_function_groups_by_segment_type():
+    ev = np.array([0.0, 1.0, 2.0, 3.0])
+    tr = {"drums": np.array([0.0, 1.0]), "bass": np.zeros(0), "other": np.zeros(0),
+          "vocals": np.zeros(0), "melody": np.zeros(0), "fx": np.zeros(0)}
+    out = stemrefine.pool_by_function([_fake_song("a", ev, tr)])
+    assert out["chorus"]["n_seg"] == 1
+    assert out["chorus"]["recall_drums"] == pytest.approx(0.5)
+
+
+def test_vocal_song_chorus_splits_by_profile():
+    ev = np.array([0.0, 1.0])
+    tr = {"drums": np.array([0.0]), "bass": np.zeros(0), "other": np.zeros(0),
+          "vocals": np.array([1.0]), "melody": np.zeros(0), "fx": np.zeros(0),
+          "pnote_vocals": np.array([1.0]), "vocal_plus": np.array([1.0])}
+    s = _fake_song("a", ev, tr)
+    out = stemrefine.vocal_song_chorus([s])
+    assert out["vocal_songs"]["n_segments"] == 1
+    assert out["vocal_songs"]["tracks"]["vocals"]["recall"] == pytest.approx(0.5)
+    assert out["instrumental_songs"]["n_segments"] == 0
+
+
+def test_sign_test_p_matches_known_values():
+    assert stemrefine._sign_test_p(0, 0) is None
+    assert stemrefine._sign_test_p(5, 5) == pytest.approx(0.0625)
+    assert stemrefine._sign_test_p(5, 10) == pytest.approx(1.0)
+
+
+def test_song_type_confusion_cross_tab():
+    rows = [{"name": "a", "profile": {"vocal_song_by_share": True,
+                                      "vocal_song_by_vad": True,
+                                      "vocal_song_by_pitched": True}},
+            {"name": "b", "profile": {"vocal_song_by_share": False,
+                                      "vocal_song_by_vad": True,
+                                      "vocal_song_by_pitched": False}}]
+    out = stemrefine.song_type_confusion(rows)
+    assert out["share_vs_vad"] == {"tt": 1, "tf": 0, "ft": 1, "ff": 0}
+    assert out["share_vs_pitched"] == {"tt": 1, "tf": 0, "ft": 0, "ff": 1}

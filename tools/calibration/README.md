@@ -20,6 +20,7 @@
 | `weights.py` | 五项 Z 特征 → 密度的 NNLS / 岭回归 + **留一曲交叉验证** + 手写预设对照 |
 | `ending.py` | 结尾形态判据（尾杀 / 渐弱 / 其他）与敏感性 |
 | `strata.py` | **（n=40 新增）** 曲目人声画像与分层汇总、精确符号检验、换权重的三条判据、单/双阈值扫描（Youden/AUC）、v0.2 单值规则表复刻、切轨模型一致率表 |
+| `stemrefine.py` | **（v0.5 新增）** 四轨 vs **六轨 + 有音高 note + fx** 的归因对照、**「16.8% 什么都不落」的收回统计**（含随机基线 lift）、人声曲副歌复验、曲目类型三套判据交叉表、把 `voiced` 换成 `vocal_pitched` 的强度 LOSO 对照 |
 | `loader.py` | 从 `out/calib/<曲名>/` 装载音频侧与谱面侧（重跑 onset，不重跑 Demucs） |
 | `cli.py` | 命令行入口 |
 
@@ -43,6 +44,29 @@ python -m tools.calibration \
   --metrics <scratchpad>/metrics40.json \
   --plots   <scratchpad>            # 逐曲 <曲名>-overlay.png + summary.png（分布与分层箱线图）
 # 可选：--tol-ms 30（切轨匹配容差）--ridge-alpha 1.0 --skip-corpus（跳过 388 谱结尾统计）
+```
+
+**v0.5 分轨细化标定**（`docs/research/stem-refinement-n40.md`）：先给每首曲目补上
+六路 stem 与 basic-pitch 缓存（**不动已有四路 stems**），再加 `--v5-metrics` 跑：
+
+```bash
+# 1) 每首补 stems_htdemucs_6s/ + pitch_notes.json（compact 落盘，约 1.5 GB / 40 首）
+python - <<'PY'
+from pathlib import Path
+from tools.audio_analysis import stems, pitch_notes as pn
+from demucs.pretrained import get_model
+m = get_model("htdemucs_6s"); m.eval()
+for d in sorted(Path("out/calib").iterdir()):
+    sd = stems.stems_dir_for(d, "htdemucs_6s")
+    stems.separate(d / "track.44k.wav", sd, "htdemucs_6s", compact=True, model=m)
+    pn.detect_batch({n: sd / f"{n}.wav"
+                     for n in ("vocals", "other", "guitar", "piano", "bass")},
+                    cache_path=sd / "pitch_notes.json")
+PY
+
+# 2) 跑对照（--v5-only 跳过 n=40 的既有全套）
+python -m tools.calibration --calib-dir out/calib \
+  --v5-metrics <scratchpad>/v5_metrics.json --csv /dev/null --skip-corpus
 ```
 
 **变速曲的前置处理（n=40 新增）**：`Grid` 只支持"在小节线上换 BPM"。变速点落在小节
