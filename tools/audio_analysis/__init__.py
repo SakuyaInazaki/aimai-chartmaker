@@ -8,7 +8,10 @@
 - L2 音轨层：`stems`（Demucs 四轨）+ `onsets`（逐 stem onset / 鼓件启发式 / 人声 VAD）
   + `quantize`（onset → 拍网格字符串）；
 - L3 结构层：`structure`（段落分段）+ `intensity`（逐小节强度曲线与高潮投票）；
-- 输出：`sheet`（analysis.json / song-sheet.md / plot.png）。
+- 输出：`sheet`（song_analysis.json / song_sheet.md / plot.png）。
+
+v0.2 的模块补充：`tracks`（四条逻辑轨与网格串渲染）、`features`（逐小节特征表）、
+`stemplan`（段落 → 主踩/副踩音轨的规则表）。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
