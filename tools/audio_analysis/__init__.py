@@ -11,7 +11,15 @@
 - 输出：`sheet`（song_analysis.json / song_sheet.md / plot.png）。
 
 v0.2 的模块补充：`tracks`（四条逻辑轨与网格串渲染）、`features`（逐小节特征表）、
-`stemplan`（段落 → 主踩/副踩音轨的规则表）。
+`stemplan`（段落 → 踩音规划）。
+
+v0.3（2026-09-11，落地 8 首官方音频配对标定的结论，见
+`docs/research/audio-chart-calibration.md`）：
+- `grid.check_offset` **修掉 ±半拍反拍假警报**（搜索窗收到 ±0.4 拍 + 显著性门 +
+  「反拍歧义」判词）；
+- `stemplan` 从单值「主踩音轨」换成 **骨架轨 + 点缀轨 + 估计占比 + 依据**；
+- `intensity` 的绝对量级锚点改走 **NPS**，段落地板可调，**intro/outro 结构封顶**；
+- `climax` 正名为**音频能量高潮**（不是谱面密度峰定位器）。
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -79,12 +79,21 @@ def _header(payload: dict) -> list[str]:
              + (f"   container start_time: {song['container_start_time_sec']*1000:.1f} ms"
                 if song.get("container_start_time_sec") else ""))
     if oc.get("available"):
+        if oc.get("offbeat_ambiguous"):
+            state = "反拍歧义→不可判定"
+        elif abs(oc["delta_ms"]) <= 15:
+            state = "OK"
+        elif abs(oc["delta_ms"]) <= 30:
+            state = "疑似 MP3 解码延迟"
+        else:
+            state = "需复核"
         L.append(f"offset_check: φ* = {oc['delta_ms']:+.1f} ms "
-                 f"（{'OK' if abs(oc['delta_ms']) <= 15 else '需复核'}，"
-                 f"方式 {oc.get('method')}，z={oc['confidence_z']:.2f}）")
+                 f"（{state}，方式 {oc.get('method')}，z={oc['confidence_z']:.2f}，"
+                 f"搜索窗 ±{oc.get('search_beats', 0.4):.2f} 拍）")
     L.append(f"structure: {payload['structure']['method']}   "
-             f"climax bar: {inten['climax_bar']}"
-             f"（次峰 {'、'.join(str(x) for x in inten['climax_peaks'])}）")
+             f"**音频能量高潮** bar: {inten.get('audio_climax_bar', inten['climax_bar'])}"
+             f"（次峰 {'、'.join(str(x) for x in inten['climax_peaks'])}）"
+             f"　⚠️ 这是**音乐最激烈处，不是谱面最密处**（8 首实测中位误差 33 小节）")
     L.append("分音使用统计: " + ("  ".join(
         f"{{{k}}}={v:.0%}" for k, v in q["division_share"].items()) or "—"))
     res_bars, all_bars = q["resolved_bars"], q["bars_with_onsets"]
@@ -98,16 +107,37 @@ def _header(payload: dict) -> list[str]:
              f"（{{32}} 红线拦下 {q['fine_blocked_bars']} 小节；三连小节 {q['triplet_bars']}）")
     if tgt.get("level") is not None:
         L.append(f"target: 定数 {tgt['level']} → note 总数 {tgt['total_p10']:.0f}–"
-                 f"{tgt['total_p90']:.0f}（均值 {tgt['total_mean']:.0f}，知识 004）；"
-                 f"官方均值 {tgt['notes_per_bar']:.2f} note/小节")
+                 f"{tgt['total_p90']:.0f}（均值 {tgt['total_mean']:.0f}，知识 004）")
+        L.append(f"密度锚（主）: NPS {tgt.get('nps')} × 每小节秒数 → "
+                 f"{tgt['notes_per_bar']:.2f} note/小节（{tgt.get('nps_source', '')}）")
+        L.append(f"密度锚（对照）: 定数→note/小节 "
+                 f"{tgt.get('notes_per_bar_level_anchor', float('nan')):.2f}"
+                 f"　⚠️ 该口径在 BPM ≥ 200 的曲子上实测系统性高估 3.1–3.7 note/小节，"
+                 f"故 v0.3 改以 NPS 为主锚")
     else:
         L.append(f"target: 未给 --level → 不给 note 总数区间；"
-                 f"密度用全库量级 {tgt['notes_per_bar']:.2f} note/小节")
+                 f"密度用全库量级 {tgt['notes_per_bar']:.2f} note/小节（无 NPS 锚）")
+    fl = tgt.get("density_floor", {})
+    if fl:
+        L.append(f"密度地板: 段落 {fl.get('section')} / 小节 {fl.get('bar')}"
+                 f"（n=8 配对标定的段落最优是 {fl.get('section_calibrated_optimum')}，"
+                 f"样本太小未采纳为默认；可用 --section-floor 自试）")
+    cap = tgt.get("structural_cap", {})
+    if cap.get("applied"):
+        L.append(f"结构封顶: intro/outro 建议密度 ≤ {cap.get('cap_notes_per_bar')} note/小节"
+                 f"（= 全曲建议均值 × {cap.get('cap_ratio')}），已封顶 "
+                 f"{cap.get('bars_capped')} 小节 —— 前奏/尾奏的密度由**结构**决定，"
+                 f"不跟能量曲线走")
     L.append("```")
     L.append("")
     L.append("> ⚠️ **下面的网格是「候选池」，不是谱面。** 按知识 005「采音要简——删到不能"
              "再删」从候选中**筛选**：能听到的音全踩上是新人谱师最典型的通病，留白本身"
              "就是表达。目标 note 总数区间见上方 `target`。")
+    L.append(">")
+    L.append("> 📏 **候选池参考量级（8 首官方音频×官方谱实测，n=8）**：官方谱只采用候选池的"
+             "**约 55%**（precision 0.546；候选池对官方 note 的 recall 0.821）——"
+             "**删到不能再删**。逐曲 precision 0.234（最稀的谱）–0.695（最密的谱），"
+             "谱越密用掉的候选越多。")
     L.append(">")
     L.append("> 字符集（仅这四个）：`X` 重音（drum=kick / vocal=有音高且强 / 其他=强 onset）、"
              "`x` 普通 onset、`-` 延音持续（人声 VAD 有声但无新 onset）、`.` 空。")
@@ -124,30 +154,41 @@ def _sections(payload: dict, segments) -> list[str]:
     L.append("## 1. Sections")
     L.append("")
     L.append("| 小节范围 | 段落（日式(英文)） | 强度 | 建议密度档 | 建议 note/小节 | "
-             "主踩 | 副踩 | chorus# | repeat_of | upgrade | rest |")
+             "**骨架** | **点缀** | 估计占比 | chorus# | repeat_of | upgrade | rest |")
     L.append("|----------|-------------------|------|-----------|----------------|"
-             "------|------|---------|-----------|---------|------|")
+             "------|------|---------|---------|-----------|---------|------|")
     for s in segments:
         rep = f"{s.repeat_of[0]}–{s.repeat_of[1]}" if s.repeat_of else "—"
+        acc = "＞".join(s.accent_stems) if s.accent_stems else "—"
+        share = "、".join(f"{k} {v:.2f}" for k, v in (s.accent_share or {}).items())
         L.append(
             f"| {s.start_bar}–{s.end_bar} | {s.label_ja} | {s.intensity:.2f}"
             f"（{s.intensity_tier}） | {s.suggested_division} | "
-            f"{s.suggested_notes_per_bar:.1f} | {s.primary_stem or '—'} | "
-            f"{s.secondary_stem or '—'} | {s.chorus_index or '—'} | {rep} | "
+            f"{s.suggested_notes_per_bar:.1f} | {s.skeleton_stem or '—'} | "
+            f"{acc} | {share or '—'} | {s.chorus_index or '—'} | {rep} | "
             f"{'✅' if s.upgrade else '—'} | {'✅' if s.rest else '—'} |")
     L.append("")
-    L.append("**逐段备注**")
+    L.append("> **骨架 / 点缀 / 依据**（v0.3 模型，取代 v0.2 的单值「主踩音轨」）："
+             "官方谱的实测形态是 **鼓骨架 + 大量非鼓填充**——8 首配对标定里 drums 命中率"
+             "0.607、**36.2% 的官方 note 不落在鼓上**、只落鼓的仅 28.1%、只落人声的仅 3.2%，"
+             "另有 **18.6% 什么 stem 都不落**（谱师自由发挥/装饰，占比里记作 `free`）。"
+             "**没有任何一段是「只踩一条轨」**，所以别把「骨架」读成「整段只踩这条」。")
+    L.append("")
+    L.append("**逐段备注与依据**")
     L.append("")
     for s in segments:
         bits = [b for b in (s.notes or []) if b]
         ev = "；".join(s.evidence) if s.evidence else ""
         L.append(f"- **{s.start_bar}–{s.end_bar} {s.label_ja}**"
-                 + (f"　证据：{ev}" if ev else "")
+                 + (f"　段落判定证据：{ev}" if ev else "")
                  + ("　" + "　".join(bits) if bits else ""))
+        for line in (s.plan_evidence or []):
+            L.append(f"    - 踩音依据（纯音频特征）：{line}")
     L.append("")
-    L.append("> 「建议 note/小节」= `(floor + (1−floor)·强度) × 该定数官方均值 note/小节`，"
-             "段落尺度 floor=0.60（官方谱密度曲线报告 §4.3 实测的可玩性地板）。"
-             "**这是初值**：真正的标定需要「官方音频 + 官方谱」的配对数据，目前没有。")
+    L.append("> 「建议 note/小节」= `(floor + (1−floor)·强度) × 锚点`，锚点 v0.3 起走 "
+             "**NPS**（定数 → NPS → × 每小节秒数），段落尺度 floor 见 Header。"
+             "**精度只到档位**：8 首配对实测逐小节 MAE 2.07–4.69（均值 3.4 note/小节，"
+             "相对误差 30–45%）—— 它是 **±3 note 的粗档**，不是逐小节目标值。")
     L.append("")
     return L
 
@@ -213,8 +254,15 @@ def _limits(payload: dict) -> list[str]:
         L.append(f"- {w}")
     L.append("- 鼓件（kick/snare/hihat）是**频带能量启发式**，不是鼓转录：底鼓 vs 低音 tom、"
              "军鼓 vs 拍手、hihat vs 镲片/齿音泄漏都会混淆，只当倾向性提示。")
-    L.append("- 人声 VAD 基于 vocals stem 的 RMS + 谐波性，合成器/和声泄漏会误判为有人声。")
-    L.append("- 强度融合权重与高潮票权重都是调研 v2 的**初值**，未在本项目曲库标定。")
+    L.append("- 人声 VAD 基于 vocals stem 的 RMS + 谐波性，合成器/和声泄漏会误判为有人声。"
+             "**「副歌全踩人声」的实测结论就建立在这条不可靠的人声 onset 上**，"
+             "故规则 4 已降级为条件触发 + 存疑（待人工听审）。")
+    L.append("- 强度融合权重与高潮票权重仍是调研 v2 的**初值**：2026-09-11 用 8 首官方音频"
+             "×官方谱做过配对标定，LOSO 交叉验证提升仅 +0.027（5/8 折、p≈0.36），"
+             "**不满足「明显优于」→ 维持初值**。两条待验假设：`voiced`→0、`flux` 0.10→0.25"
+             "（拿到 ≥20 首配对数据再验）。")
+    L.append("- 音频强度与官方谱密度只有**中等相关**（8 首实测：逐小节 Spearman 0.454、"
+             "逐段 0.523）。够定「这一段大概多密」，**不够定「高潮在哪一小节」**。")
     L.append("")
     return L
 

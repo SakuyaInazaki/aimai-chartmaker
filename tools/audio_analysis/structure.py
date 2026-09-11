@@ -69,6 +69,12 @@ class Segment:
     repeat_of: list[int] | None = None
     intensity: float = 0.0
     intensity_tier: str = ""
+    # v0.3：骨架轨 + 点缀轨（替换 v0.2 的单值主踩/副踩，见 stemplan.py 模块注释）
+    skeleton_stem: str = ""
+    accent_stems: list[str] = field(default_factory=list)
+    accent_share: dict = field(default_factory=dict)
+    plan_evidence: list[str] = field(default_factory=list)
+    # ⚠️ 已弃用（v0.2 单值模型的兼容字段）：primary = skeleton、secondary = 第一条 accent
     primary_stem: str = ""
     secondary_stem: str = ""
     chorus_index: int | None = None
@@ -109,6 +115,11 @@ class Segment:
             "density_norm": round(float(self.density_norm), 4),
             "suggested_notes_per_bar": round(float(self.suggested_notes_per_bar), 2),
             "suggested_division": self.suggested_division,
+            "skeleton_stem": self.skeleton_stem,
+            "accent_stems": list(self.accent_stems),
+            "accent_share": dict(self.accent_share),
+            "plan_evidence": list(self.plan_evidence),
+            # ⚠️ deprecated（v0.2 兼容字段，下游请改读 skeleton_stem / accent_stems）
             "primary_stem": self.primary_stem,
             "secondary_stem": self.secondary_stem,
             "evidence": self.evidence,

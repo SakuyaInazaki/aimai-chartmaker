@@ -1,4 +1,4 @@
-"""命令行入口：mp3 + 用户给定的 BPM/first → 歌曲分析单（v0.2）。
+"""命令行入口：mp3 + 用户给定的 BPM/first → 歌曲分析单（v0.3）。
 
     python -m tools.audio_analysis --audio track.mp3 --bpm 192 --first 1.875 \
         --level 13.5 --out out/TransientTears/
@@ -17,8 +17,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import (__version__, decode, features as feat_mod, intensity as intensity_mod,
-               onsets, quantize, sheet, stemplan, stems, tracks)
+from . import (__version__, decode, features as feat_mod, grid as grid_mod,
+               intensity as intensity_mod, onsets, quantize, sheet, stemplan, stems,
+               tracks)
 from .grid import Grid, check_offset, offset_verdict, parse_bpm_changes
 from .structure import (analyze_structure, assign_functions, suggest_division, tier_of)
 
@@ -59,6 +60,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vote-weights", default=None,
                    help='高潮投票权重，如 "structure=0.45,novelty=0.25,energy=0.20,'
                         'centroid=0.05,vocal=0.05"')
+    p.add_argument("--section-floor", type=float,
+                   default=intensity_mod.SECTION_DENSITY_FLOOR,
+                   help=f"段落尺度密度地板（默认 {intensity_mod.SECTION_DENSITY_FLOOR}，"
+                        f"来自 388 谱段间落差）。n=8 配对标定给出的池化最优是 "
+                        f"{intensity_mod.CALIBRATED_SECTION_FLOOR}，样本太小未采纳为默认，"
+                        f"可用本参数自行试")
+    p.add_argument("--bar-floor", type=float, default=intensity_mod.BAR_DENSITY_FLOOR,
+                   help=f"小节尺度密度地板（默认 {intensity_mod.BAR_DENSITY_FLOOR}；"
+                        f"n=8 标定实测最优 0.020，差距仅 2.4%% SSE → 保留默认）")
+    p.add_argument("--intro-outro-cap", type=float,
+                   default=intensity_mod.INTRO_OUTRO_CAP_RATIO,
+                   help=f"intro/outro 建议密度的**结构封顶**比例（默认 "
+                        f"{intensity_mod.INTRO_OUTRO_CAP_RATIO} × 全曲建议均值）。"
+                        f"前奏/尾奏的密度基线由结构决定，不跟能量曲线走；设 0 关闭")
+    p.add_argument("--offset-search-beats", type=float,
+                   default=None,
+                   help=f"offset 校验搜索半径（拍），默认 {grid_mod.DEFAULT_SEARCH_BEATS}。"
+                        f"**不得 ≥0.5**（半拍处是反拍，会并列夺峰，v0.2 的 ±1 拍就是"
+                        f"Signature/麒麟假警报的根因）")
     p.add_argument("--no-allin1", action="store_true",
                    help="跳过 all-in-one，边界只用 novelty + 重复段两路")
     p.add_argument("--align-to-detected", action="store_true",
@@ -142,9 +162,13 @@ def run(args: argparse.Namespace) -> dict:
     env = onsets.onset_envelope(y_mix, sr=sr, hop=onsets.HOP)
     env_t = onsets.frame_times(len(env), sr=sr, hop=onsets.HOP)
     mix_track = onsets.detect_onsets(y_mix, "_default", sr=sr, hop=onsets.HOP)
+    oc_kwargs = {}
+    if args.offset_search_beats is not None:
+        oc_kwargs["search_beats"] = float(args.offset_search_beats)
     oc = check_offset(env, env_t, bpm=args.bpm, first=args.first,
                       beats_per_bar=args.beats_per_bar, duration=duration,
-                      onset_times=mix_track.times, onset_weights=mix_track.strengths)
+                      onset_times=mix_track.times, onset_weights=mix_track.strengths,
+                      **oc_kwargs)
     verdict = offset_verdict(
         oc, container_start_ms=(container_start * 1000.0) if container_start else None)
     timings["offset_check"] = time.time() - t0
@@ -258,12 +282,23 @@ def run(args: argparse.Namespace) -> dict:
                                      bar_features=bar_features,
                                      vote_weights=_parse_weights(args.vote_weights),
                                      instrumental=instrumental)
-    npb, npb_note = intensity_mod.notes_per_bar_for_level(args.level)
+    # ---- 密度锚点（v0.3：主锚 = NPS，note/小节 只作对照）----
+    npb_legacy, npb_legacy_note = intensity_mod.notes_per_bar_for_level(args.level)
+    nps, nps_note = intensity_mod.nps_for_level(args.level)
+    bar_seconds = np.array([grid.bar_duration(b) for b in range(1, grid.n_bars + 1)],
+                           dtype=float)
+    if nps is not None:
+        npb_bar = intensity_mod.notes_per_bar_from_nps(nps, bar_seconds)
+        anchor = f"NPS 锚：{nps_note}；note/小节 = NPS × 每小节秒数"
+    else:
+        npb_bar = np.full(grid.n_bars, float(npb_legacy))
+        anchor = npb_legacy_note
     for s in segments:
         s.intensity_tier = tier_of(s.intensity)
         s.suggested_division = suggest_division(s.intensity_tier)
+        seg_npb = float(np.mean(npb_bar[s.start_bar - 1: min(s.end_bar, len(npb_bar))]))
         dn, notes_pb = intensity_mod.density_map(
-            np.array([s.intensity]), intensity_mod.SECTION_DENSITY_FLOOR, npb)
+            np.array([s.intensity]), float(args.section_floor), seg_npb)
         s.density_norm, s.suggested_notes_per_bar = float(dn[0]), float(notes_pb[0])
     segments, stem_warnings = stemplan.plan_stems(segments, bar_features, grid,
                                                   duration_sec=duration)
@@ -271,10 +306,16 @@ def run(args: argparse.Namespace) -> dict:
     timings["intensity"] = time.time() - t0
     print(f"[7/8] 结构（{struct['method']}）→ {len(segments)} 段"
           + ("（器乐向）" if instrumental else "")
-          + f"；高潮 = 第 {ires.climax_bar} 小节")
+          + f"；音频能量高潮 = 第 {ires.climax_bar} 小节（≠谱面密度峰）")
 
     bar_density_norm, bar_suggested = intensity_mod.density_map(
-        ires.bar_intensity, intensity_mod.BAR_DENSITY_FLOOR, npb)
+        ires.bar_intensity, float(args.bar_floor), npb_bar)
+    # intro/outro 的密度基线由**结构**封顶，不跟能量曲线走
+    cap_info = {"applied": False, "reason": "--intro-outro-cap 0 → 关闭"}
+    if float(args.intro_outro_cap) > 0:
+        segments, bar_suggested, cap_info = intensity_mod.apply_structural_cap(
+            segments, bar_suggested, cap_ratio=float(args.intro_outro_cap))
+    npb_mean = float(np.mean(npb_bar))
 
     # ---- 输出 ----
     bar_rows = []
@@ -302,7 +343,24 @@ def run(args: argparse.Namespace) -> dict:
         row["n_onset_hihat"] = row["features"].get("n_onset_hihat", 0)
         bar_rows.append(row)
 
-    tgt = {"level": args.level, "notes_per_bar": npb, "notes_per_bar_source": npb_note}
+    tgt = {
+        "level": args.level,
+        "anchor": "nps" if nps is not None else "notes_per_bar",
+        "nps": nps,
+        "nps_source": nps_note,
+        # 主锚（NPS × 每小节秒数）；变速曲逐小节不同，这里给全曲均值
+        "notes_per_bar": round(npb_mean, 3),
+        "notes_per_bar_source": anchor,
+        # 对照列：旧的「定数 → note/小节」锚（标定实测 BPM≥200 时系统性高估 3.1–3.7）
+        "notes_per_bar_level_anchor": npb_legacy,
+        "notes_per_bar_level_anchor_source": npb_legacy_note + "（对照列，非主锚）",
+        "density_floor": {"section": float(args.section_floor),
+                          "bar": float(args.bar_floor),
+                          "section_calibrated_optimum": intensity_mod.CALIBRATED_SECTION_FLOOR,
+                          "note": "段落 floor 默认 0.60 来自 388 谱；n=8 配对标定的最优是 "
+                                  "0.125（SSE 差 10.3%），样本太小未采纳"},
+        "structural_cap": cap_info,
+    }
     rng = intensity_mod.total_notes_range(args.level)
     if rng:
         tgt.update({"total_mean": rng[0], "total_p10": rng[1], "total_p90": rng[2],
@@ -311,7 +369,7 @@ def run(args: argparse.Namespace) -> dict:
     total = time.time() - t_start
     timings["total"] = total
     payload = {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "generated_by": f"tools/audio_analysis {__version__}",
         "song": {"name": song_name, "audio": str(audio_in), "wav": str(wav),
                  "duration_sec": duration,
@@ -343,13 +401,23 @@ def run(args: argparse.Namespace) -> dict:
         "intensity": {
             "weights": ires.weights,
             "loudness": ires.loudness_info,
+            # ⚠️ v0.3 正名：这是**音频能量高潮**，不是谱面密度峰定位器
+            "audio_climax_bar": ires.climax_bar,
+            "audio_climax_peaks": ires.climax_peaks,
+            "climax_kind": "audio_energy",
+            "climax_note": (
+                "`audio_climax_bar` = 音乐上最激烈的小节（五票投票）。**不是"
+                "「谱面最密小节」的定位器**：8 首官方配对实测，音频峰与官方谱密度峰的"
+                "中位误差 33 小节（曲长 67–124 小节），音频峰落在谱面密度前 20% 小节"
+                "只有 4/8、五票 climax 5/8（标定报告 §2.3）。"),
+            # 兼容字段（v0.2 名字），下游请改读 audio_climax_bar
             "climax_bar": ires.climax_bar,
             "climax_peaks": ires.climax_peaks,
             "bar_intensity": [round(float(x), 4) for x in ires.bar_intensity],
             "bar_intensity_raw": [round(float(x), 4) for x in ires.bar_raw],
             "vote_total": [round(float(x), 4) for x in ires.vote_total],
-            "density_floor": {"section": intensity_mod.SECTION_DENSITY_FLOOR,
-                              "bar": intensity_mod.BAR_DENSITY_FLOOR},
+            "density_floor": {"section": float(args.section_floor),
+                              "bar": float(args.bar_floor)},
             "note": "raw 与 smoothed 同基准（都已归一到 [0,1]）；平滑不改变电平",
         },
         "bars": bar_rows,

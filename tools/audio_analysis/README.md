@@ -1,4 +1,4 @@
-# tools/audio_analysis — 歌曲分析单生成器（原型 v0.2）
+# tools/audio_analysis — 歌曲分析单生成器（原型 v0.3）
 
 把一首 mp3 变成 **LLM 可直接消费的结构化「歌曲分析单」**：段落划分（日式标签）、
 逐小节强度与建议密度、逐小节四轨 onset 网格串、逐段切轨建议。对应
@@ -8,7 +8,22 @@
 > **前提**：BPM 与 offset（simai `&first`）**由用户给定**。本工具**不做节拍追踪**，
 > 只对用户给的 offset 做一致性校验并**如实报告差值，绝不覆盖用户值**。
 
-## 0. v0.2 变更一览（对 v0.1 的五项返工）
+## 0. v0.3 变更一览（落地 8 首官方音频配对标定的结论，2026-09-11）
+
+依据：`docs/research/audio-chart-calibration.md`（R1–R11）+ 主会话裁定。
+
+| # | 变更 | 修法 | 依据 |
+|---|------|------|------|
+| **A** | **offset 校验的 ±半拍反拍假警报（真 bug）** | 搜索半径 ±1 拍 → **±0.4 拍**（`MAX_SEARCH_BEATS=0.45` 强制夹紧）；同级峰仍取离用户值最近者；新增「反拍歧义 / 不可判定」判词与 `ratio ≥ 1.15` 显著性门；15–30 ms 的判词改指 **MP3 解码延迟**而非「谱面可能错」 | 报告 §1.2 / R1 / R2 |
+| **B** | **单值 `primary_stem` → 骨架轨 + 点缀轨** | `stemplan.py` 重写：`skeleton_stem` / `accent_stems` / `accent_share`（含 `free` 残差 0.19）/ `plan_evidence`；规则 1 判据从能量占比换成 **onset 匹配倾向**；规则 4（副歌踩人声）**条件触发 + 标存疑**；规则 5（间奏人声采样）**加强**；规则 6 **标存疑** | 报告 §5 / R8–R10 |
+| **C** | **密度绝对量级锚点 note/小节 → NPS** | `nps_for_level` + `notes_per_bar_from_nps`（NPS × 每小节秒数，变速曲逐小节算）；旧锚保留为对照列 | 报告 §4.2 / R6 |
+| **D** | **段落地板参数化 + intro/outro 结构封顶** | `--section-floor`（默认仍 0.60，Header 注明 n=8 最优 0.125）、`--bar-floor`、`--intro-outro-cap`（默认 0.60 × 全曲建议均值） | 报告 §4.1 / R5 + MYTHOS 个案 |
+| **E** | **`climax` 正名为「音频能量高潮」** | JSON 加 `audio_climax_bar` / `climax_kind` / `climax_note`；Header 显式写「不是谱面最密处，中位误差 33 小节」 | 报告 §2.3 / R4 |
+| **F** | **Header 加候选池参考量级** | 「官方谱只采用候选池约 55%（precision 0.546、recall 0.821）——删到不能再删」 | 报告 §5.2 |
+
+**没改的**：`intensity.py` 的融合权重（标定结论是维持初值，见 §6-6）。
+
+## 0.1 v0.2 变更一览（对 v0.1 的五项返工）
 
 | # | v0.1 的问题（主会话验收） | v0.2 的修法 | 依据 |
 |---|--------------------------|-------------|------|
@@ -50,6 +65,10 @@
 | `--no-fine-div` | 彻底禁止 `{32}`（默认已有红线） |
 | `--fusion-weights` | 如 `"loudness=0.25,onset=0.30,drums=0.20,voiced=0.15,flux=0.10"` |
 | `--vote-weights` | 如 `"structure=0.45,novelty=0.25,energy=0.20,centroid=0.05,vocal=0.05"` |
+| `--section-floor` | **v0.3**，段落尺度密度地板（默认 0.60）。n=8 配对标定的池化最优是 **0.125**（0.60 的 SSE 比最优差 10.3%），样本太小未采纳为默认 |
+| `--bar-floor` | **v0.3**，小节尺度密度地板（默认 0.25；标定最优 0.020，仅差 2.4% SSE → 保留） |
+| `--intro-outro-cap` | **v0.3**，intro/outro 建议密度的结构封顶比例（默认 0.60 × 全曲建议均值；设 0 关闭） |
+| `--offset-search-beats` | **v0.3**，offset 搜索半径（拍），默认 0.40；**不得 ≥0.5**（半拍处是反拍），超了会被夹到 0.45 |
 | `--no-allin1` | 跳过 all-in-one，边界只用 novelty + 重复段两路 |
 | `--align-to-detected` | **默认关**。用 offset 校验找到的偏移构造分析网格 |
 | `--force` | 忽略缓存，重跑解码与分离 |
@@ -68,7 +87,7 @@
 | `features.py` | **逐小节特征表**（v2 §4.1 清单） |
 | `structure.py` | **边界三路投票 + 日式标签词表 + pre_chorus/chorus/final_chorus/rest 派生** |
 | `intensity.py` | **五项融合强度 + 高潮五票 + 强度→建议密度映射** |
-| `stemplan.py` | **段落 → 主踩/副踩音轨**（v2 §4.4 规则表） |
+| `stemplan.py` | **段落 → 骨架轨 + 点缀轨 + 估计占比 + 依据**（v0.3；规则表见模块注释） |
 | `sheet.py` | 输出 `song_analysis.json` / `song_sheet.md` / `plot.png` |
 | `cli.py` | 串联全流程 |
 
@@ -99,15 +118,17 @@ out/<song>/
 
 | 字段 | 内容 |
 |------|------|
-| `schema_version` | `"0.2"` |
-| `song` / `grid` / `offset_check` / `offset_verdict` / `warnings` / `stems` / `tools` | 同 v0.1 |
-| **`target`** | `level` / `notes_per_bar`（该定数官方均值）/ `total_mean`·`total_p10`·`total_p90`（知识 004） |
+| `schema_version` | `"0.3"` |
+| `song` / `grid` / `warnings` / `stems` / `tools` | 同 v0.1 |
+| **`offset_check`** | v0.3 新增 `search_beats`·`search_beats_clamped`·`sec_per_beat`·`half_beat_ms`·**`offbeat_ambiguous`**·**`tied_symmetric`**·`offbeat_reason`·`ratio_gate` |
+| `offset_verdict` | v0.3 四档判词：一致 / 疑似 MP3 解码延迟（15–30 ms）/ 反拍歧义·显著性不足 → **不报警** / 报警 |
+| **`target`** | `level` / **`anchor`**（`nps`）/ **`nps`**·`nps_source` / `notes_per_bar`（= NPS × 每小节秒数，全曲均值）/ **`notes_per_bar_level_anchor`**（旧口径对照）/ `total_mean`·`total_p10`·`total_p90`（知识 004）/ **`density_floor`**（含 n=8 标定最优值）/ **`structural_cap`**（intro/outro 封顶记录） |
 | **`quantize`** | `division_histogram`（全部有 onset 的小节）/ **`division_histogram_resolved`**（真的被选中的）/ `resolved_bars` / `unquantized_onsets` / `unquantized_ratio` / `fine_blocked_bars` / `triplet_bars` / `per_track`（逐轨量化误差） |
 | **`bar_divisions[bar]`** | `division` / `resolved` / `n_unquantized` / `triplet` / `fine_blocked` / `rms_ms` / `max_ms` / `reason` |
 | `vocal_vad` | 阈值 / `global_voiced_ratio` / **`instrumental`**（器乐向判定） |
 | **`structure.boundary_vote`** | 每个边界候选的 `bar` / `votes` / `sources`（哪几路提名） |
-| **`structure.segments[]`** | `start_bar`/`end_bar`/`cluster`/`function`/**`label_ja`**/**`label_display`**（`サビ(chorus)`）/`is_repeat`/`repeat_of`/**`chorus_index`**/**`upgrade`**/**`rest`**/`intensity`/`intensity_tier`/`voiced_ratio`/**`density_norm`**/**`suggested_notes_per_bar`**/`suggested_division`/`primary_stem`/`secondary_stem`/**`evidence`**（判定证据）/`notes`（规则出处） |
-| `intensity` | 权重 / `climax_bar` / `climax_peaks` / `bar_intensity`（平滑后）/ **`bar_intensity_raw`**（同基准、未平滑）/ `vote_total` / `density_floor` |
+| **`structure.segments[]`** | `start_bar`/`end_bar`/`cluster`/`function`/**`label_ja`**/**`label_display`**（`サビ(chorus)`）/`is_repeat`/`repeat_of`/**`chorus_index`**/**`upgrade`**/**`rest`**/`intensity`/`intensity_tier`/`voiced_ratio`/**`density_norm`**/**`suggested_notes_per_bar`**/`suggested_division`/**`skeleton_stem`**/**`accent_stems[]`**/**`accent_share{}`**（含 `free`）/**`plan_evidence[]`**（纯音频特征依据）/`primary_stem`·`secondary_stem`（⚠️ v0.2 兼容字段，已弃用）/**`evidence`**（段落判定证据）/`notes`（规则出处与存疑标注） |
+| `intensity` | 权重 / **`audio_climax_bar`**·**`climax_kind`**·**`climax_note`**（音频能量高潮，≠谱面密度峰）/ `climax_bar`·`climax_peaks`（兼容名）/ `bar_intensity`（平滑后）/ **`bar_intensity_raw`**（同基准、未平滑）/ `vote_total` / `density_floor` |
 | **`bars[]`** | `division` / `resolved` / `n_unquantized` / `intensity` / `intensity_raw` / `density_norm` / `suggested_notes` / `patterns{drum,vocal,bass,hook}` / **`features{}`**（见下） |
 | **`bars[].features`** | `share_*`、`n_onset_*`（含 kick/snare/hihat）、`n_onset_merged`、`grid_fit_*`（v2 的 `{8}` 口径）、`grid_fit_bar_*`（对齐到该小节实际 div）、`voiced_ratio`、`riff_sim_4`、`riff_sim_8`、`sil_run`、`hf_ratio` |
 
@@ -226,6 +247,84 @@ v0.1 在这首上给的是 all-in-one 的 `intro/verse/chorus/solo/chorus/end`�
 
 三首都没有触发"整曲单轨"警告。
 
+### 5.7 v0.3 实跑（2026-09-11，11 首：8 首官方曲包 + 3 首测试曲）
+
+**复用 `out/` 里已缓存的 wav 与 Demucs stems，未重跑分离**；8 首官方曲的 mp3 与谱面在
+`out/calib/`（gitignore，不入库），3 首测试曲只用 `~/Desktop/self-charts/*/track.mp3`
+的音频，**谱面正文未读**（AGENT 准则 11）。
+
+#### A 项：offset 反拍假警报修复前后
+
+| 曲目 | BPM | 半拍 (ms) | v0.2 φ\* | **v0.3 φ\*** | 同级峰 | ratio | v0.3 判词 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Back 2 Back | 150 | 200.0 | +7.7 | **+7.7** | 1 | 1.19 | 一致 |
+| MYTHOS | 158 | 189.9 | +10.8 | **+11.0** | 1 | 1.39 | 一致 |
+| Mare Maris | 150 | 200.0 | **+27.9** | **+27.9** | 1 | 15.37 | **疑似 MP3 解码延迟**（保留报出，措辞按 R2 改） |
+| **Signature** | 128 | 234.4 | **−229.0**（假警报） | **+0.6** | 1 | 1.00 | 一致 ✅ 修复 |
+| Xevel | 176→185 | 170.5 | +7.2 | **+7.6** | 6 | 1.03 | 一致（对称同级峰 → 注明参考价值打折） |
+| 初音ミクの激唱 | 200 | 150.0 | +4.1 | **+4.1** | 1 | 1.04 | 一致 |
+| 幻想のサテライト | 230 | 130.4 | +7.2 | **+7.1** | 1 | 1.16 | 一致 |
+| **麒麟** | 220 | 136.4 | **−129.8**（假警报） | **+10.6** | 1 | 1.29 | 一致 ✅ 修复 |
+| TransientTears | 192 | 156.3 | +13.7 | **+13.9** | 1 | 1.81 | 一致 |
+| チモシー健康ジャズ | 145 | 206.9 | +10.6 | **+10.5** | 1 | 1.50 | 一致 |
+| 金魚鉢からの脱走 | 148 | 202.7 | +8.0 | **+8.0** | 1 | 1.21 | 一致 |
+
+- **两个假警报（Signature −229.0 ≈ −半拍 234.4、麒麟 −129.8 ≈ −半拍 136.4）全部消失**，
+  φ\* 回到 +0.6 / +10.6 ms；
+- **Mare Maris 的 +27.9 ms 仍被报出**（ratio 15.37，远高于 1.15 的显著性门），
+  但判词从"建议人工复核"改成"**这个量级几乎都是 MP3 解码/容器延迟**"；
+- 其余 9 首的 φ\* 变化 ≤ 0.4 ms（搜索窗变窄不影响真值附近的峰）；
+- Xevel 是打分曲线平坦的个案（z=1.7、6 个同级峰对称）：不报「反拍歧义」（φ\* 只有 +7.6 ms），
+  但判词里注明参考价值打折。
+- 回归测试：`test_offbeat_false_alarm_is_reproduced_with_legacy_window`（合成"反拍略强于
+  正拍的 8 分 hi-hat"，用 `search_beats=1.0, allow_offbeat_window=True` **复现**出 ±半拍的
+  假警报）+ `test_offbeat_false_alarm_fixed_by_default_window`（默认窗口下 |φ\*| ≤ 25 ms 且不报警）。
+
+#### B 项：骨架 + 点缀的实际输出
+
+11 首共 **122 段**：骨架 **drum 114 段（93.4%）**，例外 8 段（幻想 2 段 hook / TransientTears 4 段
+hook / Mare Maris 1 段 vocal / 激唱 1 段 bass，全部是"鼓 onset 太少或不落格"触发的降级）。
+
+**Signature（BPM 128，定数 13.5）** —— 非人声主导曲目的典型：
+
+| 小节 | 段落 | 骨架 | 点缀 | 估计占比 |
+|---|---|---|---|---|
+| 13–28 | サビ(chorus) #1 | drum | hook ＞ vocal | drum 0.55 / hook 0.15 / vocal 0.11 / free 0.19 |
+| 29–36 | ラスサビ(final_chorus) #2 | drum | hook ＞ vocal | drum 0.55 / hook 0.16 / vocal 0.10 / free 0.19 |
+| 55–62 | 間奏(interlude) | drum | bass | drum 0.69 / bass 0.12 / free 0.19 |
+
+副歌段的判词：「本段**不是人声主导**（voiced=0.58、vocals/drums onset 密度比=0.43）→ 维持
+**drums 骨架**，人声只作重音点缀」+ 存疑标注。v0.2 在这里会无条件答 `vocal`。
+
+**幻想のサテライト（BPM 230，定数 14.1）** —— 标定里**唯一**的"副歌踩人声"正例：
+
+| 小节 | 段落 | 骨架 | 点缀 | 判定 |
+|---|---|---|---|---|
+| 49–62 | サビ #1 | drum | **vocal ＞ hook** | 人声主导（voiced=1.00、密度比 0.87） |
+| 89–96 | サビ #2 | drum | hook | 密度比 0.68 达标，但 vocals 落格率 0.30 < 0.5 → 人声点缀被降级规则去掉 |
+| 97–112 | サビ #3 | drum | **vocal ＞ hook** | 人声主导（密度比 0.72） |
+| 113–126 | 間奏 | **hook** | — | ⚠️ 骨架降级：该段 drums onset 均值 0.2 < 2 |
+
+→ 条件触发在唯一已知正例上**确实会点亮**，在其余 7 首上一次都没点亮。
+⚠️ 但判据阈值（密度比 0.65）是在这 8 首上分出来的（幻想 0.68–0.87 vs 其余 ≤ 0.64），
+**属 n=8 调参，存疑**。
+
+#### C 项：NPS 锚 vs note/小节 锚（8 首官方曲，与官方谱实际 note/小节 对比）
+
+| 锚点 | MAPE |
+|---|---:|
+| **NPS 锚（v0.3 默认）** | **22.5%** |
+| note/小节 锚（v0.2，对照列） | 29.3% |
+
+方向与标定报告 §4.2（16.5% vs 21.0%）一致（绝对值不同：本表用"定数取最近档 + 全曲均值"口径）。
+改善最大的是高 BPM 曲：幻想 10.54 → **7.45**（实际 6.85）、麒麟 10.54 → **7.79**（实际 7.22）。
+⚠️ MYTHOS 反而变差（10.10 → 11.70，实际 9.67），Signature 也略差 —— **NPS 锚不是每首都更准**。
+
+#### D 项：intro/outro 结构封顶
+
+11 首里 **9 首**触发（封顶 3–17 小节不等），MYTHOS 与 TransientTears 因前奏本来就不高而未触发。
+例：麒麟封顶 12 小节（intro 1–18 的建议密度被压到 ≤ 3.53 note/小节）。
+
 ## 6. 已知限制（按可靠性从低到高）
 
 1. **分音判定被"四轨并集"稀释**。div 由该小节全部 stem 的 onset 并集决定（v2 §1.1 的
@@ -244,25 +343,49 @@ v0.1 在这首上给的是 all-in-one 的 `intro/verse/chorus/solo/chorus/end`�
    器乐曲没有"副歌"概念，这是信息本身的限制，不是实现问题；但档位阈值是拍脑袋的。
 5. **chorus 的 45% 全局护栏是启发式**。金魚鉢 上有 6 段拿到 ≥2 路证据（整曲 voiced 0.64
    让"人声活动"票几乎人人有份），靠这条护栏砍到 4 段。护栏本身没有实证依据。
-6. **强度融合权重与五票权重都是 v2 的初值，未在本项目曲库标定**。真正的标定需要
-   "官方音频 + 官方谱"的配对数据（v2 §3.4(E)），目前没有。
-7. **"建议 note/小节"是初值**：`density_norm = floor + (1−floor)·I`（段落 floor 0.60、
-   小节 floor 0.25，来自官方谱密度曲线报告 §4.3 的实测地板），再乘该定数的官方均值
-   note/小节（13.0→8.03 / 13.5→9.15 / 14.0→10.54，缺省 9.0）。它保证了绝对量级来自
-   官方谱、相对起伏来自音频，但**没有经过任何配对验证**。
-8. **offset 只能定到一拍以内**（同 v0.1）；**变速是实验性的**（同 v0.1）。
-9. **basic-pitch 仍未装上**（pip `resolution-too-deep`，见 v0.1 记录）。人声/贝斯只有
+6. **强度融合权重与五票权重仍是 v2 的初值**——2026-09-11 已用 8 首官方音频×官方谱做过
+   配对标定，结论是**维持初值**（LOSO 交叉验证 0.515 vs 初值 0.488，5/8 折胜出、
+   符号检验 p≈0.36，不满足"明显优于"；见标定报告 §3）。两条待验假设留在
+   `intensity.py` 注释里：`voiced`→0（单项 ρ 0.016）、`flux` 0.10→0.25（单项 ρ 0.524，
+   五项最高），**须等 ≥20 首配对数据**再验，不得凭 n=8 改动。
+7. **"建议 note/小节"精度只到档位**：8 首配对实测逐小节 MAE 2.07–4.69（均值 3.4
+   note/小节，相对误差 30–45%）→ 它是 **±3 note 的粗档**。v0.3 已把绝对量级锚点换成
+   NPS（MAPE 22.5% vs 旧口径 29.3%，本机 8 首复算），但**锚点本身仍只在 n=8 上验证过，
+   且不是每首都更准**（MYTHOS、Signature 反而变差）。段落 floor 0.60 与 n=8 的池化最优
+   0.125 冲突，**默认未改**（388 谱 vs 8 首，以大样本为准）。
+8. **intro/outro 的结构封顶比例 0.60 是个案推广**：来源是 MYTHOS 一首（前奏音频强度≈1.0、
+   官方谱只放 4 note/小节）。方向（前奏密度由结构定、不跟能量走）有依据，**0.60 这个数
+   没有**；`--intro-outro-cap` 可调。
+9. **`stemplan` 的「人声主导」阈值是 n=8 调出来的**（voiced ≥0.45 且 vocals/drums onset
+   密度比 ≥0.65）：8 首里只有幻想のサテライト在 0.65 以上。**存疑，且 C1 结论本身待人工听审**
+   （ground truth 是 onset 代理，人声侧最不可靠）。逐段"估计占比"从未被验证，只是量级提示。
+10. **offset 只能定到一拍以内**（同 v0.1）；v0.3 把搜索窗收到 ±0.4 拍后，**真实偏移超过
+   0.4 拍的曲子会测不出来**（这是为消除反拍假警报付出的代价，在"用户提供 offset"的前提下
+   可接受）；**变速是实验性的**（同 v0.1）。
+11. **basic-pitch 仍未装上**（pip `resolution-too-deep`，见 v0.1 记录）。人声/贝斯只有
    能量 onset，没有音高/时值 note 事件——这是限制 1 与 3 的共同上游。
 
 ## 7. 测试
 
 ```bash
-.venv/bin/python -m pytest tests/test_audio_analysis.py -q   # 65 passed
-.venv/bin/python -m pytest tests/ -q                          # 107 passed（含 chart_analysis 42）
+.venv/bin/python -m pytest tests/test_audio_analysis.py -q   # 81 passed
+.venv/bin/python -m pytest tests/ -q                          # 164 passed（+ chart_analysis 42 + calibration 41）
 ```
 
 全部用 **numpy 合成音频/合成事件**（已知 BPM/first/分音的 click 序列与合成结构曲线），
-仓库内不放任何真实音频（AGENT.md 准则 5）。v0.2 新增覆盖：
+仓库内不放任何真实音频（AGENT.md 准则 5）。
+
+**v0.3 新增覆盖**：
+- **offset 反拍回归**：合成"反拍略强的 8 分 hi-hat" → 旧窗口（±1 拍）复现 ±半拍假警报、
+  默认窗口（±0.4 拍）修复；搜索半径超 0.45 拍被夹紧；只有反拍有音时判「反拍歧义」不报警；
+  判词四档（一致 / 解码延迟 / 显著性不足不报警 / 报警）；对称同级峰只降置信不改判词。
+- **骨架+点缀**：骨架默认 drums；副歌人声**条件触发**（主导 / 非主导两条路径）；
+  规则 4/5/6 的存疑标注；intro 用匹配倾向而非能量占比；估计占比含 `free` 残差且合计≈1；
+  鼓不可用时骨架降级；第 N 次副歌复用整套计划；outro 镜像 intro；单轨警告；依据只含音频特征。
+- **密度锚**：NPS 表与知识 031 一致；NPS→note/小节 随 BPM 缩放（高 BPM 不再高估）；
+  段落 floor 可参数化（0.60 / 0.125）；intro/outro 结构封顶只封不抬。
+
+v0.2 覆盖：
 
 - **量化**：τ(d) 单调且被 clamp；v0.1 容差为何让 24/32 不可分；1/48 拍重采样的整数格；
   三连门接受真三连 / 拒绝二分小节；`{32}` 红线三条件（非鼓拦下 / 鼓且 onset≥6 放行 /

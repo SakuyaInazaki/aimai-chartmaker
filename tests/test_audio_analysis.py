@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.audio_analysis import features, intensity, onsets, quantize, stemplan, tracks  # noqa: E402
 from tools.audio_analysis.grid import (  # noqa: E402
-    BpmChange, Grid, check_offset, parse_bpm_changes,
+    BpmChange, Grid, check_offset, offset_verdict, parse_bpm_changes,
 )
 from tools.audio_analysis import structure as struct_mod  # noqa: E402
 
@@ -69,7 +69,11 @@ class FakeSeg:
         self.intensity = kw.get("intensity", 0.5)
         self.voiced_ratio = kw.get("voiced_ratio", 0.0)
         self.chorus_index = kw.get("chorus_index")
-        self.primary_stem = ""
+        self.skeleton_stem = ""
+        self.accent_stems = []
+        self.accent_share = {}
+        self.plan_evidence = []
+        self.primary_stem = ""       # 兼容字段（v0.2）
         self.secondary_stem = ""
         self.notes = []
         self.evidence = []
@@ -414,6 +418,64 @@ def test_total_notes_range_from_knowledge_004():
     assert p10 < mean < p90 and (p10, p90) == (492, 967)
 
 
+# ---- v0.3：NPS 锚 / 段落地板可调 / intro-outro 结构封顶 ----
+
+
+def test_nps_anchor_matches_knowledge_031():
+    assert intensity.nps_for_level(13.5)[0] == pytest.approx(6.13)
+    assert intensity.nps_for_level(14.0)[0] == pytest.approx(7.14)
+    assert intensity.nps_for_level(None)[0] is None
+
+
+def test_notes_per_bar_from_nps_scales_with_bpm():
+    """高 BPM 下每小节更短 → note/小节更少（这正是 note/小节锚高估的根因）。"""
+    bar_sec_150 = 4 * 60.0 / 150.0          # 1.6 s
+    bar_sec_230 = 4 * 60.0 / 230.0          # 1.043 s
+    npb_slow = intensity.notes_per_bar_from_nps(6.13, [bar_sec_150])[0]
+    npb_fast = intensity.notes_per_bar_from_nps(6.13, [bar_sec_230])[0]
+    assert npb_slow == pytest.approx(6.13 * 1.6, rel=1e-6)
+    assert npb_fast < npb_slow
+    # 定数 13.5 的 note/小节 对照锚是 9.15：BPM 230 时 NPS 锚明显更低（不再高估）
+    assert npb_fast < intensity.notes_per_bar_for_level(13.5)[0] - 2.0
+
+
+def test_section_floor_is_a_parameter_not_a_constant():
+    I = np.array([0.0, 1.0])
+    dn_default, _ = intensity.density_map(I, intensity.SECTION_DENSITY_FLOOR, 9.15)
+    dn_calib, _ = intensity.density_map(I, intensity.CALIBRATED_SECTION_FLOOR, 9.15)
+    assert dn_default[0] == pytest.approx(0.60)
+    assert dn_calib[0] == pytest.approx(0.125)   # n=8 实测最优，仅作可选值
+    assert dn_default[1] == dn_calib[1] == pytest.approx(1.0)
+
+
+def test_structural_cap_limits_intro_outro_density():
+    """MYTHOS 个案：前奏音频强度≈1.0，官方谱只放 4 note/小节 → 结构封顶。"""
+    segs = [FakeSeg(1, 4, "intro"), FakeSeg(5, 12, "chorus"), FakeSeg(13, 16, "outro")]
+    for s_, v in zip(segs, (10.0, 10.0, 10.0)):
+        s_.suggested_notes_per_bar = v
+    bar_suggested = np.full(16, 10.0)
+    segs, capped, info = intensity.apply_structural_cap(segs, bar_suggested,
+                                                        cap_ratio=0.6)
+    assert info["applied"] and info["cap_notes_per_bar"] == pytest.approx(6.0)
+    assert capped[:4].max() == pytest.approx(6.0)      # intro 被压
+    assert capped[4:12].max() == pytest.approx(10.0)   # 副歌不动
+    assert capped[12:].max() == pytest.approx(6.0)     # outro 被压
+    assert segs[0].suggested_notes_per_bar == pytest.approx(6.0)
+    assert "结构封顶" in "".join(segs[0].notes)
+
+
+def test_structural_cap_does_not_raise_low_intro():
+    """封顶只封不抬：本来就低的前奏不受影响。"""
+    segs = [FakeSeg(1, 4, "intro"), FakeSeg(5, 16, "chorus")]
+    segs[0].suggested_notes_per_bar, segs[1].suggested_notes_per_bar = 2.0, 10.0
+    bar_suggested = np.concatenate([np.full(4, 2.0), np.full(12, 10.0)])
+    segs, capped, info = intensity.apply_structural_cap(segs, bar_suggested,
+                                                        cap_ratio=0.6)
+    assert info["cap_notes_per_bar"] == pytest.approx(0.6 * 8.0)   # 均值 8.0
+    assert capped[:4].max() == pytest.approx(2.0)                  # 低前奏不被抬
+    assert segs[0].suggested_notes_per_bar == pytest.approx(2.0)
+
+
 # ---------------- 7. 结构：边界投票与标签派生 ----------------
 
 
@@ -533,79 +595,143 @@ def test_tier_and_suggest_division():
     assert struct_mod.suggest_division("low") == "{8}"
 
 
-# ---------------- 8. 切轨规则表 ----------------
+# ---------------- 8. 踩音规划：骨架轨 + 点缀轨（v0.3） ----------------
 
 
 def _stem_feats(n=32, **over):
+    """默认：四轨都可用、人声活跃（= 人声主导型曲目）。"""
     f = {}
     for s in ("drums", "bass", "other", "vocals"):
         f[f"share_{s}"] = np.full(n, 0.25)
         f[f"n_onset_{s}"] = np.full(n, 6.0)
         f[f"grid_fit_{s}"] = np.full(n, 0.9)
+        f[f"grid_fit_bar_{s}"] = np.full(n, 0.9)
     f["voiced_ratio"] = np.full(n, 0.7)
     f.update(over)
     return f
 
 
-def test_chorus_primary_is_vocal():
+def test_skeleton_defaults_to_drums():
+    """v0.3 的核心改动：骨架默认是鼓（实测 drums recall 0.607、70/85 段最高）。"""
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
-    out, warn = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
-    assert out[1].primary_stem == "vocal"
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    assert [s.skeleton_stem for s in out] == ["drum", "drum", "drum"]
 
 
-def test_verse_uses_other_with_vocal_tail():
+def test_chorus_vocal_accent_is_conditional():
+    """C1：副歌踩人声只在**人声主导**时成立，否则人声只作点缀。"""
+    # (a) 人声主导：voiced 0.7、vocals onset 与 drums 同级
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    led = out[1]
+    assert led.skeleton_stem == "drum"
+    assert led.accent_stems[0] == "vocal"
+    assert "人声主导" in "".join(led.notes)
+
+    # (b) 非人声主导：voiced 低且人声 onset 稀疏 → 人声不再领衔
     f = _stem_feats()
-    f["share_other"] = np.full(32, 0.5)
-    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "verse"), FakeSeg(25, 32, "outro")]
+    f["voiced_ratio"] = np.full(32, 0.20)
+    f["n_onset_vocals"] = np.full(32, 2.5)
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out2, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
+    assert out2[1].skeleton_stem == "drum"
+    assert out2[1].accent_stems[0] != "vocal"
+    assert "不是人声主导" in "".join(out2[1].notes)
+
+
+def test_chorus_rule_is_marked_suspect():
+    """C1 被裁定为「条件性 + 存疑，待人工听审」——输出必须带存疑标注。"""
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    joined = "".join(out[1].notes)
+    assert "存疑" in joined and "人工听审" in joined
+
+
+def test_interlude_vocal_sample_is_strengthened():
+    """C4：间奏人声采样是标定唯一正面支持的规则（precision 0.715）。"""
+    f = _stem_feats()
+    f["voiced_ratio"] = np.full(32, 0.30)
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "interlude"), FakeSeg(25, 32, "outro")]
     out, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
-    assert out[1].primary_stem == "hook" and out[1].secondary_stem == "vocal"
+    assert out[1].skeleton_stem == "drum" and out[1].accent_stems[0] == "vocal"
+    assert "0.715" in "".join(out[1].notes)
 
 
-def test_outro_mirrors_intro():
+def test_intro_uses_match_tendency_not_energy_share():
+    """C3：intro 判据从能量占比换成 onset 匹配倾向（能量口径会选错轨）。"""
     f = _stem_feats()
-    f["share_bass"] = np.full(32, 0.7)
+    f["share_other"] = np.full(32, 0.90)       # 最响
+    f["n_onset_other"] = np.full(32, 2.0)      # 但可踩音少
+    f["grid_fit_bar_other"] = np.full(32, 0.55)
+    f["n_onset_bass"] = np.full(32, 9.0)       # 匹配倾向最高
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
     out, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
-    assert out[2].primary_stem == out[0].primary_stem
+    assert out[0].accent_stems[:1] == ["bass"]
 
 
-def test_repeat_chorus_uses_same_stem_and_upgrade():
+def test_accent_share_includes_free_residual():
+    """估计占比必须含 18.6%「什么都不落」的残差，且合计 ≈ 1。"""
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    share = out[1].accent_share
+    assert share["free"] == pytest.approx(stemplan.FREE_PLAY_SHARE)
+    assert sum(share.values()) == pytest.approx(1.0, abs=0.03)
+
+
+def test_skeleton_degrades_when_drums_unusable():
+    f = _stem_feats()
+    f["n_onset_drums"] = np.full(32, 0.5)      # 鼓几乎没有 onset
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
+    assert out[1].skeleton_stem != "drum"
+    assert "骨架降级" in "".join(out[1].notes)
+
+
+def test_repeat_chorus_reuses_whole_plan_and_upgrade():
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 16, "chorus"),
             FakeSeg(17, 24, "interlude"),
             FakeSeg(25, 32, "final_chorus", repeat_of=[9, 16], upgrade=True)]
     out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
-    assert out[3].primary_stem == out[1].primary_stem
+    assert out[3].skeleton_stem == out[1].skeleton_stem
+    assert out[3].accent_stems == out[1].accent_stems
     assert "upgrade" in "".join(out[3].notes)
 
 
-def test_degrades_to_drums_when_track_unusable():
+def test_outro_mirrors_intro():
     f = _stem_feats()
-    f["n_onset_vocals"] = np.full(32, 0.5)        # 人声几乎没有 onset
+    f["n_onset_bass"] = np.full(32, 9.0)
     segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
     out, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
-    assert out[1].primary_stem == "drum"
-    assert "降级" in "".join(out[1].notes)
+    assert out[2].skeleton_stem == out[0].skeleton_stem
+    assert out[2].accent_stems == out[0].accent_stems
+
+
+def test_quiet_chorus_marked_suspect():
+    """C5：休息段规则数据不支持也不反对（13 段，一致率 0.62）→ 标存疑。"""
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "quiet_chorus"),
+            FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    assert "存疑" in "".join(out[1].notes)
 
 
 def test_single_track_warning():
+    """反新手护栏：全曲「骨架 ∪ 点缀」只有一条轨才报警（且曲短不报）。"""
     f = _stem_feats()
-    f["share_vocals"] = np.full(32, 0.9)
+    for s in ("bass", "other", "vocals"):
+        f[f"n_onset_{s}"] = np.full(32, 0.5)   # 只有鼓可用
     segs = [FakeSeg(1, 16, "chorus"), FakeSeg(17, 32, "chorus")]
     out, warn = stemplan.plan_stems(segs, f, _FakeGrid(32), 150.0)
     assert warn and "哪个最响就一直踩哪个" in warn[0]
-    # 曲短则不报警
     _, warn2 = stemplan.plan_stems(segs, f, _FakeGrid(32), 60.0)
     assert not warn2
 
 
-def test_rest_segment_switches_to_second_loudest():
-    f = _stem_feats()
-    f["share_vocals"] = np.full(32, 0.5)
-    f["share_other"] = np.full(32, 0.3)
-    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "interlude", rest=True),
-            FakeSeg(25, 32, "outro")]
-    out, _ = stemplan.plan_stems(segs, f, _FakeGrid(32), 120.0)
-    assert "休息段" in "".join(out[1].notes)
+def test_plan_evidence_is_audio_only():
+    """依据必须是纯音频特征（推理期没有谱面）。"""
+    segs = [FakeSeg(1, 8, "intro"), FakeSeg(9, 24, "chorus"), FakeSeg(25, 32, "outro")]
+    out, _ = stemplan.plan_stems(segs, _stem_feats(), _FakeGrid(32), 120.0)
+    ev = " ".join(out[1].plan_evidence)
+    assert "onset 密度" in ev and "落格率" in ev and "voiced_ratio" in ev
 
 
 # ---------------- 9. 逐小节特征 ----------------
@@ -694,13 +820,110 @@ def test_check_offset_onset_fit_path(user_error):
 
 
 def test_check_offset_prefers_peak_nearest_user_value():
+    """整拍平移歧义：宽窗里会出现多个同级峰，必须取离用户值最近的那个。"""
     true_first, bpm, duration = 0.5, 150.0, 24.0
     g = Grid(bpm=bpm, first=true_first, beats_per_bar=4, duration=duration)
     tr = onsets.detect_onsets(synth_clicks(g.all_beat_times(), duration=duration), "drums")
-    res = check_offset(None, None, bpm=bpm, first=true_first, duration=duration,
+    wide = check_offset(None, None, bpm=bpm, first=true_first, duration=duration,
+                        onset_times=tr.times, onset_weights=tr.strengths,
+                        search_beats=1.0, allow_offbeat_window=True)
+    assert wide["n_tied_peaks"] >= 2
+    assert abs(wide["best_first"] - true_first) < 0.015
+    # v0.3 默认窗（±0.4 拍）里整拍复制峰根本进不来
+    narrow = check_offset(None, None, bpm=bpm, first=true_first, duration=duration,
+                          onset_times=tr.times, onset_weights=tr.strengths)
+    assert narrow["n_tied_peaks"] == 1
+    assert abs(narrow["best_first"] - true_first) < 0.015
+
+
+# ---- v0.3 回归：±半拍「反拍」假警报（标定报告 §1.2 / R1）----
+
+
+def _offbeat_hihat_clicks(bpm=128.0, first=0.0, duration=30.0, offbeat_gain=1.5):
+    """合成 8 分 hi-hat：正拍在拍线上、反拍在半拍处，**反拍略强**（模拟真实曲目里
+    正反拍几乎等强、反拍因检测噪声略占优的情形）。
+
+    这正是 Signature（BPM 128，φ* 被报成 −229 ms ≈ −半拍 234.4 ms）与
+    麒麟（BPM 220，−129.8 ms ≈ −半拍 136.4 ms）假警报的成因。
+    """
+    g = Grid(bpm=bpm, first=first, beats_per_bar=4, duration=duration)
+    beats = g.all_beat_times()
+    half = 30.0 / bpm                       # 半拍
+    y = synth_clicks(beats, duration=duration, seed=1)
+    y = y + offbeat_gain * synth_clicks(beats + half, duration=duration, seed=2)
+    return g, (y / (float(np.max(np.abs(y))) or 1.0) * 0.8).astype(np.float32)
+
+
+def test_offbeat_false_alarm_is_reproduced_with_legacy_window():
+    """反例断言：v0.2 的 ±1 拍窗口会把反拍选成 φ*（= 被修掉的那个 bug）。"""
+    bpm, duration = 128.0, 30.0
+    g, y = _offbeat_hihat_clicks(bpm=bpm, duration=duration)
+    tr = onsets.detect_onsets(y, "drums")
+    legacy = check_offset(None, None, bpm=bpm, first=0.0, duration=duration,
+                          onset_times=tr.times, onset_weights=tr.strengths,
+                          search_beats=1.0, allow_offbeat_window=True)
+    half_ms = 30_000.0 / bpm               # 234.4 ms
+    assert abs(abs(legacy["delta_ms"]) - half_ms) < 25.0, legacy["delta_ms"]
+
+
+def test_offbeat_false_alarm_fixed_by_default_window():
+    """修后：默认 ±0.4 拍窗口里反拍进不来，φ* 回到真值附近且不报警。"""
+    bpm, duration = 128.0, 30.0
+    g, y = _offbeat_hihat_clicks(bpm=bpm, duration=duration)
+    tr = onsets.detect_onsets(y, "drums")
+    res = check_offset(None, None, bpm=bpm, first=0.0, duration=duration,
                        onset_times=tr.times, onset_weights=tr.strengths)
-    assert res["n_tied_peaks"] >= 2
-    assert abs(res["best_first"] - true_first) < 0.015
+    assert abs(res["delta_ms"]) <= 25.0, res["delta_ms"]
+    assert res["offbeat_ambiguous"] is False
+    assert "建议人工复核" not in offset_verdict(res)
+
+
+def test_search_window_is_clamped_below_half_beat():
+    """搜索半径不得 ≥0.5 拍（半拍处就是反拍）——超了要被夹回并注明。"""
+    bpm, duration = 128.0, 20.0
+    g = Grid(bpm=bpm, first=0.0, beats_per_bar=4, duration=duration)
+    tr = onsets.detect_onsets(synth_clicks(g.all_beat_times(), duration=duration), "drums")
+    res = check_offset(None, None, bpm=bpm, first=0.0, duration=duration,
+                       onset_times=tr.times, onset_weights=tr.strengths,
+                       search_beats=1.0)
+    assert res["search_beats_clamped"] is True
+    assert res["search_beats"] <= 0.45
+
+
+def test_offbeat_ambiguity_is_flagged_not_alarmed():
+    """只有反拍有音时，φ* 贴到窗口边缘 → 判「反拍歧义 / 不可判定」，不报警。"""
+    bpm, duration = 128.0, 30.0
+    g = Grid(bpm=bpm, first=0.0, beats_per_bar=4, duration=duration)
+    half = 30.0 / bpm
+    y = synth_clicks(g.all_beat_times() + half, duration=duration)
+    tr = onsets.detect_onsets(y, "drums")
+    res = check_offset(None, None, bpm=bpm, first=0.0, duration=duration,
+                       onset_times=tr.times, onset_weights=tr.strengths)
+    assert res["offbeat_ambiguous"] is True
+    v = offset_verdict(res)
+    assert "反拍歧义" in v and "建议人工复核" not in v
+
+
+def test_verdict_bands_decode_delay_and_ratio_gate():
+    """判词四档：一致 / 疑似解码延迟 / 显著性不足 → 不报警 / 才报警。"""
+    base = {"available": True, "confidence_z": 3.0, "method": "onset-fit",
+            "n_tied_peaks": 1, "offbeat_ambiguous": False, "half_beat_ms": 234.4}
+    assert "一致" in offset_verdict({**base, "delta_ms": 8.0, "ratio": 1.2})
+    assert "解码" in offset_verdict({**base, "delta_ms": 27.9, "ratio": 15.4})
+    assert "不报警" in offset_verdict({**base, "delta_ms": 80.0, "ratio": 1.02})
+    assert "建议人工复核" in offset_verdict({**base, "delta_ms": 80.0, "ratio": 1.9})
+
+
+def test_symmetric_ties_downgrade_confidence_but_not_the_verdict():
+    """打分曲线平坦、同级峰对称（如 Xevel）：φ* 仍在容差内就还是「一致」，
+    只是注明参考价值打折；**不得**因此误报成「反拍歧义」。"""
+    base = {"available": True, "confidence_z": 1.7, "method": "onset-fit",
+            "n_tied_peaks": 6, "offbeat_ambiguous": False, "tied_symmetric": True,
+            "half_beat_ms": 170.5}
+    v_ok = offset_verdict({**base, "delta_ms": 7.6, "ratio": 1.03})
+    assert "一致" in v_ok and "反拍歧义" not in v_ok and "打折" in v_ok
+    v_big = offset_verdict({**base, "delta_ms": 90.0, "ratio": 3.0})
+    assert "不报警" in v_big
 
 
 # ---------------- 11. 逐小节聚合 / VAD ----------------

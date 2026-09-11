@@ -186,6 +186,26 @@ def parse_bpm_changes(spec: str | None) -> tuple[BpmChange, ...]:
 
 # ---------- offset 校验 ----------
 
+# v0.3 反拍假警报修复（`docs/research/audio-chart-calibration.md` §1.2 / R1）
+#
+# **bug**：v0.2 的搜索半径是 ±1 拍，而 onset-fit 的打分函数本身以**一拍为周期**，
+# 于是窗口里除了真值峰，还含有 φ*±1 拍的复制峰**与 φ*±半拍的「反拍」峰**。
+# 在鼓点规整（8 分 hi-hat 正反拍等强）的曲子上，反拍与正拍得分几乎并列，
+# 只要反拍略高就会被选中 —— 实测假警报：Signature（BPM 128）−229.0 ms
+# ≈ −半拍 234.4 ms；麒麟（BPM 220）−129.8 ms ≈ −半拍 136.4 ms。
+#
+# **修法（三条同时）**：
+#   ① 搜索半径收到 **±0.4 拍**（= 半拍 − 0.1 拍的保护边），反拍根本进不了窗口；
+#   ② 同级峰仍然「取离用户值最近的那个」（v0.2 已有，保留）；
+#   ③ |φ*| 逼近半拍（≥ 0.35 拍）或出现**对称并列峰** → 判 **「反拍歧义 / 不可判定」**，
+#      **不报警**；且 |φ*| > 容差时还要过一道 `ratio ≥ 1.15` 的显著性门才报警。
+DEFAULT_SEARCH_BEATS = 0.40
+MAX_SEARCH_BEATS = 0.45          # 再大就会把反拍放进窗口
+OFFBEAT_FRAC = 0.35              # |φ*| ≥ 0.35 拍 → 视为逼近反拍
+SYMMETRIC_TOL_MS = 20.0          # 两个同级峰关于用户值对称的容差
+ALARM_RATIO_GATE = 1.15          # φ* 必须比 φ=0 的得分高出这么多倍才允许报警
+DECODE_HINT_MS = 30.0            # 15–30 ms：指向 MP3 解码延迟而不是"谱面可能错"
+
 
 def _sample_envelope(env: np.ndarray, times: np.ndarray, frame_times: np.ndarray) -> float:
     """在给定秒数处线性插值采样 onset 包络并求和。"""
@@ -202,13 +222,14 @@ def check_offset(
     first: float,
     beats_per_bar: int = 4,
     duration: float | None = None,
-    search_beats: float = 1.0,
+    search_beats: float = DEFAULT_SEARCH_BEATS,
     step: float = 0.005,
     subdivision: int = 1,
     tie_ratio: float = 0.90,
     onset_times: np.ndarray | None = None,
     onset_weights: np.ndarray | None = None,
     tolerance: float = 0.025,
+    allow_offbeat_window: bool = False,
 ) -> dict:
     """beat-synchronous 对齐搜索：在用户 first 附近找最能解释 onset 的偏移。
 
@@ -226,7 +247,10 @@ def check_offset(
         onset_env / frame_times: 整曲 onset 强度包络及其帧时间（envelope 路必需）
         bpm/first/beats_per_bar: 用户给定的网格参数
         onset_times/onset_weights: 检出的 onset 秒数与权重（给 onset-fit 路用）
-        search_beats: 搜索半径（拍），默认 ±1 拍
+        search_beats: 搜索半径（拍），默认 **±0.40 拍**。
+            ⚠️ **不得 ≥ 0.5 拍**：打分函数以一拍为周期，半拍处正是"反拍"，
+            在正反拍等强的曲子上会并列夺峰（v0.2 的 ±1 拍就是 Signature/麒麟
+            假警报的根因）。超过 `MAX_SEARCH_BEATS` 会被夹回并在结果里注明。
         step: 搜索步长（秒），默认 5ms
         tolerance: onset-fit 的容差（秒），默认 25ms
         subdivision: envelope 路每拍再细分多少格（默认 1 = 严格 beat-synchronous）
@@ -243,6 +267,10 @@ def check_offset(
     if duration is None:
         duration = float(frame_times[-1]) if frame_times.size else float(onset_times.max())
     sec_per_beat = 60.0 / bpm
+    clamped = float(search_beats) > MAX_SEARCH_BEATS and not allow_offbeat_window
+    if clamped:
+        search_beats = MAX_SEARCH_BEATS
+    search_beats = float(search_beats)
     radius = search_beats * sec_per_beat
     candidates = np.arange(first - radius, first + radius + step * 0.5, step)
 
@@ -280,16 +308,47 @@ def check_offset(
         "method": method,
         "user_first": float(first),
         "search_radius_sec": float(radius),
+        "search_beats": float(search_beats),
+        "search_beats_clamped": bool(clamped),
+        "sec_per_beat": float(sec_per_beat),
+        "half_beat_ms": float(sec_per_beat * 500.0),
+        "ratio_gate": float(ALARM_RATIO_GATE),
         "step_sec": float(step),
         "tolerance_sec": float(tolerance),
         "note": "仅报告，不覆盖用户给定的 --first；offset 只能定到一拍以内",
     })
+    result.update(_offbeat_flags(result, sec_per_beat))
     if env_scores is not None and method != "envelope":
         env_res = _summarize_alignment(env_scores, candidates, first, step, tie_ratio)
         result["envelope_best_first"] = env_res["best_first"]
         result["envelope_delta_ms"] = env_res["delta_ms"]
         result["envelope_note"] = "包络法系统性偏晚约 10ms（librosa onset_strength 的帧间滞后）"
     return result
+
+
+def _offbeat_flags(result: dict, sec_per_beat: float) -> dict:
+    """判定「反拍歧义」：φ* 逼近半拍，或出现关于用户值对称的并列峰。
+
+    这两种情形下 offset **不可判定**（真值附近不是局部极大，算法只是在两个反拍
+    候选里二选一），按 R1-③ 应报「不可判定」而不是报警。
+    """
+    offbeat_ms = OFFBEAT_FRAC * sec_per_beat * 1000.0
+    near_offbeat = abs(float(result["delta_ms"])) >= offbeat_ms
+    deltas = [float(p["delta_ms"]) for p in result.get("peaks", [])]
+    symmetric = any(
+        a < 0.0 < b and abs(a + b) <= SYMMETRIC_TOL_MS
+        and min(abs(a), abs(b)) >= 0.25 * sec_per_beat * 1000.0
+        for a in deltas for b in deltas)
+    return {
+        "offbeat_threshold_ms": float(offbeat_ms),
+        # φ* 本身就贴在反拍上 → 这次校验没有意义
+        "offbeat_ambiguous": bool(near_offbeat),
+        # 同级峰关于用户值对称（打分曲线平坦、正反拍并列）→ 参考价值低，
+        # 但若 φ* 仍落在容差内，结论"一致"照样成立，只是置信度打折
+        "tied_symmetric": bool(symmetric),
+        "offbeat_reason": ("φ* 逼近半拍（反拍）" if near_offbeat else
+                           ("同级峰关于用户值对称（正反拍并列）" if symmetric else "")),
+    }
 
 
 def _summarize_alignment(scores: np.ndarray, candidates: np.ndarray, first: float,
@@ -338,8 +397,15 @@ def _summarize_alignment(scores: np.ndarray, candidates: np.ndarray, first: floa
 
 
 def offset_verdict(check: dict, tolerance_ms: float = 15.0,
-                   container_start_ms: float | None = None) -> str:
-    """把 offset 校验结果翻成一句中文结论。"""
+                   container_start_ms: float | None = None,
+                   decode_hint_ms: float = DECODE_HINT_MS,
+                   ratio_gate: float = ALARM_RATIO_GATE) -> str:
+    """把 offset 校验结果翻成一句中文结论（v0.3：四档，含「反拍歧义」）。
+
+    档位：**一致 ≤15 ms** / **疑似解码延迟 15–30 ms**（R2：措辞指向 MP3 容器
+    `start_time`，不是"谱面可能错"）/ **反拍歧义（不可判定，不报警）** /
+    **报警 >30 ms 且 `ratio ≥ 1.15`**。
+    """
     if not check.get("available"):
         return "offset 校验不可用：" + str(check.get("reason", ""))
     d = abs(check["delta_ms"])
@@ -356,10 +422,29 @@ def offset_verdict(check: dict, tolerance_ms: float = 15.0,
     if container_start_ms and 5.0 <= d <= 60.0:
         extra += (f"；注意音频容器 start_time={container_start_ms:.1f} ms（MP3 编码器延迟），"
                   f"可解释其中一部分差值——设计文档 §2 已警示 MP3 解码偏移 20–40ms")
+
+    # 反拍歧义优先于一切：这种情况下 φ* 本身没有意义
+    if check.get("offbeat_ambiguous"):
+        return (f"⚠️ **反拍歧义，offset 不可判定**：φ* = {check['delta_ms']:+.1f} ms，"
+                f"半拍 = {check.get('half_beat_ms', 0.0):.1f} ms"
+                f"（{check.get('offbeat_reason', '')}）。正拍与反拍得分接近时算法只是在两个"
+                f"反拍候选里二选一，**不作为报警**；已按用户值构造网格。{conf}{extra}。")
+    if check.get("tied_symmetric"):
+        extra += "；打分曲线平坦且同级峰关于用户值对称（正反拍并列），本次校验参考价值打折"
     if d <= tolerance_ms:
         return (f"用户 first 与自动最佳偏移相差 {check['delta_ms']:+.1f} ms"
                 f"（≤{tolerance_ms:.0f}ms），一致；{conf}{extra}。")
+    if d <= decode_hint_ms:
+        return (f"用户 first 与自动最佳偏移相差 {check['delta_ms']:+.1f} ms"
+                f"（{tolerance_ms:.0f}–{decode_hint_ms:.0f}ms）——**这个量级几乎都是 MP3 "
+                f"解码/容器延迟**（容器 start_time 常见 23 ms），**不是「谱面可能错」**；"
+                f"以用户值为准，如需逐帧对齐可人工核一次。{conf}{extra}。")
+    ratio = float(check.get("ratio", 0.0) or 0.0)
+    if ratio < ratio_gate or check.get("tied_symmetric"):
+        return (f"φ* = {check['delta_ms']:+.1f} ms（>{decode_hint_ms:.0f}ms）但得分只比用户值"
+                f"高 {ratio:.2f}×（< 显著性门 {ratio_gate:.2f}×）→ **判为不可判定，不报警**；"
+                f"已按用户值构造网格。{conf}{extra}。")
     return (
-        f"用户 first 与自动最佳偏移相差 {check['delta_ms']:+.1f} ms（>{tolerance_ms:.0f}ms），"
-        f"建议人工复核；{conf}{extra}。已按用户值构造网格。"
+        f"用户 first 与自动最佳偏移相差 {check['delta_ms']:+.1f} ms（>{decode_hint_ms:.0f}ms，"
+        f"得分 {ratio:.2f}× 用户值），建议人工复核；{conf}{extra}。已按用户值构造网格。"
     )

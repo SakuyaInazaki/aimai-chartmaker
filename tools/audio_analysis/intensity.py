@@ -75,8 +75,14 @@ DEFAULT_VOTE_WEIGHTS = {
 }
 
 # 官方谱逐小节密度绝对量级（docs/research/official-chart-density-curves.md §2.4）
+# ⚠️ v0.3 起**不再作为主锚点**，只保留作对照列：标定实测这条锚在 BPM ≥ 200 的曲子上
+#    系统性高估 3.1–3.7 note/小节（note/小节 口径 MAPE 21.0%）。
 LEVEL_NOTES_PER_BAR = {13.0: 8.03, 13.5: 9.15, 14.0: 10.54, 14.5: 10.10}
 DEFAULT_NOTES_PER_BAR = 9.0
+# **v0.3 主锚点：NPS**（知识 031 §7 的 NPS 列）。标定报告 §4.2：NPS 口径 MAPE 16.5%
+# 优于 note/小节口径的 21.0%，幻想のサテライト（BPM 230）从 −35% 改善到 −8%。
+# note/小节 = NPS × 每小节秒数 = NPS × beats_per_bar × 60 / BPM。
+LEVEL_NPS = {13.0: 5.29, 13.5: 6.13, 14.0: 7.14, 14.5: 7.70}
 # note 总数区间（知识 004，ST/SD 谱：均值 (p10–p90)）
 LEVEL_TOTAL_NOTES = {
     13.0: (643.7, 445, 828),
@@ -84,9 +90,18 @@ LEVEL_TOTAL_NOTES = {
     14.0: (899.8, 685, 1080),
     14.5: (1020.7, 733, 1181),
 }
-# 密度地板（官方谱密度曲线报告 §4.3）
+# 密度地板（官方谱密度曲线报告 §4.3 / 知识 031 §2）
+# ⚠️ 段落尺度 0.60 与 n=8 配对标定的池化最优值 **0.125** 冲突（标定报告 §4.1：
+#    0.60 的 SSE 比最优差 10.3%）。**不改默认**——0.60 来自 388 谱的段间落差统计，
+#    n=8 不足以推翻；但 CLI 开了 `--section-floor` 让使用者自己试 0.125。
 SECTION_DENSITY_FLOOR = 0.60
 BAR_DENSITY_FLOOR = 0.25
+CALIBRATED_SECTION_FLOOR = 0.125    # n=8 实测最优（仅记录，不作默认）
+# 结构封顶：intro/outro 的密度基线**由结构决定**，不跟能量曲线走。
+# 依据（个案，主会话 2026-09-11 看叠加图）：MYTHOS 小节 8–19 音频强度 ≈ 1.0，
+# 官方谱却只放 4 note/小节 —— 谱师按「这是前奏」压密度，不按响度。
+INTRO_OUTRO_CAP_RATIO = 0.60
+STRUCTURAL_CAP_FUNCTIONS = ("intro", "outro")
 
 
 def loudness_normalize(y: np.ndarray, sr: int, target_lufs: float = TARGET_LUFS
@@ -319,11 +334,68 @@ def vote_climax(
 
 
 def notes_per_bar_for_level(level: float | None) -> tuple[float, str]:
-    """定数 → 官方均值 note/小节。缺省用全库量级 9.0。"""
+    """定数 → 官方均值 note/小节（**v0.3 起只作对照列**，主锚点见 `nps_for_level`）。"""
     if level is None:
         return DEFAULT_NOTES_PER_BAR, "无 --level，用全库量级 9.0 note/小节"
     key = min(LEVEL_NOTES_PER_BAR, key=lambda k: abs(k - float(level)))
     return LEVEL_NOTES_PER_BAR[key], f"定数 {key} 的官方均值（密度曲线报告 §2.4）"
+
+
+def nps_for_level(level: float | None) -> tuple[float | None, str]:
+    """定数 → 官方均值 **NPS**（知识 031 §7）。这是 v0.3 的主锚点。"""
+    if level is None:
+        return None, "无 --level → 无 NPS 锚，退回 note/小节 全库量级"
+    key = min(LEVEL_NPS, key=lambda k: abs(k - float(level)))
+    return LEVEL_NPS[key], f"定数 {key} 的官方均值 NPS {LEVEL_NPS[key]}（知识 031 §7）"
+
+
+def notes_per_bar_from_nps(nps: float, bar_seconds) -> np.ndarray | float:
+    """NPS → note/小节：`NPS × 每小节秒数`（变速曲逐小节各算各的）。
+
+    标定报告 §4.2：换成 NPS 锚后 MAPE 从 21.0% 降到 16.5%，BPM ≥ 200 的三首
+    （激唱 / 幻想 / 麒麟）不再被系统性高估 3.1–3.7 note/小节。
+    """
+    return float(nps) * np.asarray(bar_seconds, dtype=float)
+
+
+def apply_structural_cap(segments, bar_suggested: np.ndarray,
+                         cap_ratio: float = INTRO_OUTRO_CAP_RATIO,
+                         functions: tuple[str, ...] = STRUCTURAL_CAP_FUNCTIONS,
+                         ) -> tuple[list, np.ndarray, dict]:
+    """**intro/outro 的密度由结构封顶，不跟能量曲线走。**
+
+    上限 = `cap_ratio × 全曲建议 note/小节 的均值`。段落级与逐小节级同时封顶。
+    依据：MYTHOS 个案（音频强度 ≈ 1.0 的前奏，官方谱只放 4 note/小节）。
+    """
+    bar_suggested = np.asarray(bar_suggested, dtype=float).copy()
+    if bar_suggested.size == 0:
+        return list(segments), bar_suggested, {"applied": False, "reason": "无逐小节建议密度"}
+    cap = float(cap_ratio) * float(np.mean(bar_suggested))
+    capped_segments: list[str] = []
+    n_bars_capped = 0
+    for s in segments:
+        if (getattr(s, "function", "") or "") not in functions:
+            continue
+        lo = max(0, s.start_bar - 1)
+        hi = min(len(bar_suggested), s.end_bar)
+        hit = bar_suggested[lo:hi] > cap
+        n_bars_capped += int(np.count_nonzero(hit))
+        bar_suggested[lo:hi] = np.minimum(bar_suggested[lo:hi], cap)
+        if getattr(s, "suggested_notes_per_bar", 0.0) > cap:
+            s.suggested_notes_per_bar = cap
+            s.notes.append(
+                f"**结构封顶**：{s.function} 的建议密度按结构压到 ≤ {cap:.2f} note/小节"
+                f"（= 全曲建议均值 × {cap_ratio:.2f}）——前奏/尾奏的密度基线由结构决定，"
+                f"**不跟能量曲线走**（MYTHOS 个案：音频强度≈1.0 的前奏官方只放 4 note/小节）")
+            capped_segments.append(f"{s.start_bar}–{s.end_bar} {s.function}")
+    return list(segments), bar_suggested, {
+        "applied": bool(capped_segments or n_bars_capped),
+        "cap_ratio": float(cap_ratio),
+        "cap_notes_per_bar": round(cap, 3),
+        "segments": capped_segments,
+        "bars_capped": n_bars_capped,
+        "functions": list(functions),
+    }
 
 
 def density_map(intensity: np.ndarray, floor: float, notes_per_bar: float
@@ -335,7 +407,8 @@ def density_map(intensity: np.ndarray, floor: float, notes_per_bar: float
     """
     I = np.clip(np.asarray(intensity, dtype=float), 0.0, 1.0)
     dn = floor + (1.0 - floor) * I
-    return dn, dn * float(notes_per_bar)
+    # `notes_per_bar` 可以是标量，也可以是**逐小节数组**（NPS 锚在变速曲上逐小节不同）
+    return dn, dn * np.asarray(notes_per_bar, dtype=float)
 
 
 def total_notes_range(level: float | None) -> tuple[float, float, float] | None:
