@@ -41,7 +41,8 @@
   - **官方谱逐小节密度基准** → `tools/chart_analysis/`（simai 时间轴解析器，387/388 零错，manifest 对账 97.2%）+ `docs/research/official-chart-density-curves.md`（388 谱密度曲线：五段模板实测、密度地板、末段最强、休息段规律；结论入库为知识 **031**，知识 001 相应修订）；
   - **设计定稿 v1.1** → `docs/audio-analysis.md`（合并上述全部证据与原型实测；当前实现状态见其 §11）；
   - **原型** → `tools/audio_analysis/`（mp3 + BPM/first → 统一解码 → offset 校验 → Demucs 分轨 → 逐 stem onset 量化网格串 → 结构分段 → 强度曲线 → song sheet 双格式 + 复核图；3 首测试曲实跑，合成音频单测全绿）；
-  - 过程记录：notes 034–038。
+  - **官方音频配对标定**（用户提供 8 首官方 ST 谱 zip → 本机 `official-mp3/`，不入库）→ `tools/calibration/` + `docs/research/audio-chart-calibration.md`：强度×密度逐小节 ρ 0.454 / 逐段 0.523，权重留一曲 CV 未显著优于初值故不换；各 stem 命中率（鼓骨架 recall 0.607，只落人声 3.2%）与切轨规则表一致率；候选池 recall 0.82 / precision 0.55；388 谱结尾形态尾杀 65% / 渐弱 1% / 其他 34%（知识 031 §10）；
+  - 过程记录：notes 034–041。
 - [x] 调研 simai 语法规范，产出文档 `docs/simai-syntax.md`（v1.0 定稿，2026-09-10）：
   - 三路调研合流：官方 simai wiki（记法定义者 Celeca 规范）+ 社区解析器源码 + 中文社区教程；
   - 原始调研报告存档于 `docs/research/`（official-spec-research.md / parser-source-analysis.md / chinese-community-research.md）；
@@ -61,8 +62,8 @@
     在此之前，`level14-readings.md` 中所有星星类观察（自环星、星链、星-单交替、双星齐奏、往返星等）
     **只算原文记录，不得作为结论写入知识库**。
 - [ ] **逐谱精读向 13 级及以下扩展**（待用户安排；14 级已读完）
-- [ ] **分析工具迭代与标定**（原型已可用；待做：`basic-pitch` 装包、结构标签人工复核、RWC-Pop / osu2beat2025 评测协议 A/B 档、强度融合权重标定——后者须等用户提供官方音频；清单见 `docs/audio-analysis.md` §9/§10）
-- [ ] **待用户拍板**：① 知识 001「渐弱淡出」是否按 388 谱实测改写为「末段最强」（目前标存疑）；② CC BY 4.0 是否纳入依赖白名单（决定 SongFormer 去留）；③ 是否提供 10–20 首官方音频做"音频 × 官方谱密度"配对标定
+- [ ] **分析工具迭代与标定**（原型已可用；待做：`basic-pitch` 装包、结构标签与人声侧归因的人工听审复核、RWC-Pop / osu2beat2025 评测协议 A/B 档、更多官方音频下的权重标定；清单见 `docs/audio-analysis.md` §9/§10）
+- [ ] **待用户拍板**：① CC BY 4.0 是否纳入依赖白名单（决定 SongFormer 去留）；② 知识 002「副歌全踩人声」在 8 首官方曲的代理实测下降为条件性并标存疑（见知识 032），需用户听审裁定；③ 若能再提供更多官方音频（尤其人声主导曲），可把 n=8 的标定与切轨验证做实
 - [ ] **工作流指引**：拿到 mp3 后的完整操作 SOP（串联分析与创作）
 
 ## 技术路线（v1.1，2026-09-11；详见 `docs/audio-analysis.md`）
@@ -91,6 +92,7 @@
    - `tools/` — 分析工具代码（`tools/audio_analysis/` 音频分析管线原型；`tools/chart_analysis/` simai 解析器与官方谱密度统计），依赖装在仓库根 `.venv/`（python3.12，不入库）
    - `tests/` — 单元测试（只用自写 simai 片段与 numpy 合成音频，不放真实音频/官方谱原文）
    - `out/` — 分析输出（stems/特征/图，含版权音频衍生物，不入库）
+   - `official-mp3/` — 用户提供的官方谱 zip（官方 maidata + 版权 mp3），仅本机标定用，不入库
    - `AGENT.md` — 本文件（项目对 agent 的说明）
    - 样例谱面等其余目录在需要时再统一规划
 5. **版权与素材**：仓库中不得提交有版权的音频文件；测试用音频使用自创或无版权素材。
