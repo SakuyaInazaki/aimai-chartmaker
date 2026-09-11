@@ -36,6 +36,12 @@
   - **逐谱精读**：按用户要求"必须逐个谱去看"，把本地 14 级（14.0–14.5）**87 个谱面文件全部读完**，逐谱记录「配置构成 / 强度难度分布 / 可复用手法 / 存疑」→ `docs/research/level14-readings.md`（含各组小结、总总结、跨谱候选装置 46+ 条、账目对账）；
   - **知识库建库**：`.agent/knowledge/` 现有 **30 条**原子条目（用户逐条讲授为来源，官方谱为验证）；
   - **过程记录**：`.agent/notes/` 现有 **33 篇**（编号 001–033）。
+- [x] **音频分析攻坚（2026-09-11）**：在"BPM / offset / 变速点由用户直接提供"的前提下，攻克"AI 通过分析 mp3 了解哪里是副歌、哪里是高潮、采鼓点还是人声"（对应 MMFC 第五章强度/踩音/配置理论）：
+  - **调研第二轮** → `docs/research/audio-analysis-research-v2.md`（onset→分音网格量化规则、offset 反向校验、J-pop 结构分段证据与日式标签词表、无官方音频的标定协议、切轨可计算代理、song sheet 表示、M4/py3.12 可行性、评测数据；24 条修订建议）；
+  - **官方谱逐小节密度基准** → `tools/chart_analysis/`（simai 时间轴解析器，387/388 零错，manifest 对账 97.2%）+ `docs/research/official-chart-density-curves.md`（388 谱密度曲线：五段模板实测、密度地板、末段最强、休息段规律；结论入库为知识 **031**，知识 001 相应修订）；
+  - **设计定稿 v1.1** → `docs/audio-analysis.md`（合并上述全部证据与原型实测；当前实现状态见其 §11）；
+  - **原型** → `tools/audio_analysis/`（mp3 + BPM/first → 统一解码 → offset 校验 → Demucs 分轨 → 逐 stem onset 量化网格串 → 结构分段 → 强度曲线 → song sheet 双格式 + 复核图；3 首测试曲实跑，合成音频单测全绿）；
+  - 过程记录：notes 034–038。
 - [x] 调研 simai 语法规范，产出文档 `docs/simai-syntax.md`（v1.0 定稿，2026-09-10）：
   - 三路调研合流：官方 simai wiki（记法定义者 Celeca 规范）+ 社区解析器源码 + 中文社区教程；
   - 原始调研报告存档于 `docs/research/`（official-spec-research.md / parser-source-analysis.md / chinese-community-research.md）；
@@ -55,21 +61,22 @@
     在此之前，`level14-readings.md` 中所有星星类观察（自环星、星链、星-单交替、双星齐奏、往返星等）
     **只算原文记录，不得作为结论写入知识库**。
 - [ ] **逐谱精读向 13 级及以下扩展**（待用户安排；14 级已读完）
-- [ ] **分析工具落地实现**（节拍 / 分轨 onset / 结构分段 / 强度曲线；路线见 `docs/audio-analysis.md`）
+- [ ] **分析工具迭代与标定**（原型已可用；待做：`basic-pitch` 装包、结构标签人工复核、RWC-Pop / osu2beat2025 评测协议 A/B 档、强度融合权重标定——后者须等用户提供官方音频；清单见 `docs/audio-analysis.md` §9/§10）
+- [ ] **待用户拍板**：① 知识 001「渐弱淡出」是否按 388 谱实测改写为「末段最强」（目前标存疑）；② CC BY 4.0 是否纳入依赖白名单（决定 SongFormer 去留）；③ 是否提供 10–20 首官方音频做"音频 × 官方谱密度"配对标定
 - [ ] **工作流指引**：拿到 mp3 后的完整操作 SOP（串联分析与创作）
 
-## 技术路线（2026-09-10 定稿，详见 `docs/audio-analysis.md`）
+## 技术路线（v1.1，2026-09-11；详见 `docs/audio-analysis.md`）
 
-**路线决策**：特征分析先行、生成器后置——不采用"全频谱直接进 Transformer"的端到端路线。四层管线：
+**路线决策**（2026-09-10，用户）：特征分析先行、生成器后置——不采用"全频谱直接进 Transformer"的端到端路线。四层管线（v1.1）：
 
-1. **L1 节拍层**（beat_this，MIT）：BPM/拍点/下拍 → 谱面时间轴；用户提供的 BPM/offset 为最高优先级覆盖
-2. **L2 音轨层**（Demucs htdemucs_ft + basic-pitch，MIT/Apache）：鼓/人声/贝斯/其他 stems 分离 → 各 stem onset 流 = 踩音候选池
-3. **L3 结构层**（all-in-one + FMP/libfmp SSM，MIT/ISC）：段落分段（含 chorus 标签）+ 重复段验证副歌 + librosa 强度曲线/高潮定位
-4. **L4 规划层**：结构 × 强度 × 音轨 → 逐段踩音计划（charting_plan.json），规则来自 `.agent/knowledge/` 001-016；生成端只消费结构化特征（LLM 不接触原始音频）
+1. **L1 节拍层**：用户提供的 BPM/offset/变速点为最高优先级；管线只做 **offset 反向校验**（网格相位搜索 + BPM 漂移回归，只报告不覆盖）；全程 ffmpeg 统一转 WAV；beat_this/librosa 仅作缺省与交叉验证
+2. **L2 音轨层**：Demucs htdemucs（MIT）四 stems → 逐 stem onset → **拍网格量化**（每小节单一分音、容差 `τ=clamp(0.25·slot,12,30)ms`、三连判别、**`{32}` 红线**）+ 鼓件三频带启发式 + 人声 VAD → 逐小节特征清单 = 踩音候选池
+3. **L3 结构层**：all-in-one-infer（MIT）+ libfmp/SSM 重复段三路投票分段、**日式(英文)双标签**、pre_chorus 规则派生；强度 = 响度 / 去重 onset 数 / 鼓能量 / 人声活动 / 谱通量融合，五票定高潮；**强度→密度映射用 388 官方谱实测**（`T_density` + 密度地板，知识 031）
+4. **L4 规划层**：结构 × 强度 × 音轨 → **song sheet 双格式**（`song_sheet.md` 给 LLM、`song_analysis.json` 给程序；逐小节 4 轨网格串是候选池不是谱面）+「段落类型 × 特征 → 主踩音轨」规则表（规则来自 `.agent/knowledge/` 001–005/031）；生成端只消费结构化特征（LLM 不接触原始音频）
 5. **语法与可玩性校验**（`docs/simai-error-checking.md` §10）：四层校验 + SimaiSharp/MajdataEdit/MiaCode 三检，不通过自动迭代修复
 6. **输出**：合法 `maidata.txt`（零报错安全子集，`docs/simai-syntax.md` §6）
 
-工具选型红线：默认依赖仅 MIT/Apache-2.0/ISC/BSD；AGPL/GPL/CC BY-NC 权重不进默认管线（详见 `docs/audio-analysis.md` §7）。
+工具选型红线：默认依赖仅 MIT/Apache-2.0/ISC/BSD；AGPL/GPL/CC BY-NC 权重不进默认管线（已排除 ADTOF / LarsNet / omnizart / pop-music-highlighter；SongFormer 为 CC BY 4.0 但其 MuQ 权重 NC，仅作非商用第二意见；详见 `docs/audio-analysis.md` §7）。
 
 ## 工作准则（coding agent 必须遵守）
 
@@ -81,8 +88,11 @@
    - `.agent/knowledge/` — 制谱意识知识库（谱面设计的稳定认知，跨上下文记忆，见该目录 README.md）
    - `.agent/notes/` — 项目变更记录（变更内容 + 理由，见该目录 README.md）
    - `resource/` — 用户提供的参考资料（本机留存，默认不入库，见该目录 README.md）
+   - `tools/` — 分析工具代码（`tools/audio_analysis/` 音频分析管线原型；`tools/chart_analysis/` simai 解析器与官方谱密度统计），依赖装在仓库根 `.venv/`（python3.12，不入库）
+   - `tests/` — 单元测试（只用自写 simai 片段与 numpy 合成音频，不放真实音频/官方谱原文）
+   - `out/` — 分析输出（stems/特征/图，含版权音频衍生物，不入库）
    - `AGENT.md` — 本文件（项目对 agent 的说明）
-   - 后续实现代码、测试、样例谱面的目录结构在 Phase 0 结束时统一规划
+   - 样例谱面等其余目录在需要时再统一规划
 5. **版权与素材**：仓库中不得提交有版权的音频文件；测试用音频使用自创或无版权素材。
 6. **社区合规**：调研 simai 语法与校验器时，参考社区公开资料并注明来源；若参考了特定开源项目，需遵守其许可证要求。
 7. **变更记录**：每次对项目做实质变更（增删改文件、方向性决策）后，必须在 `.agent/notes/` 下新增一条编号笔记，说明**变更内容与理由**，并与变更在同一提交中推送；格式约定见 `.agent/notes/README.md`。
@@ -94,6 +104,7 @@
    - `.agent/knowledge/` 存稳定认知，`.agent/notes/` 存变更过程，二者勿混淆；格式约定见 `.agent/knowledge/README.md`。
 9. **用户讲授制谱经验时——引文即边界**：用户给出的谱面引文（片段）**就是该配置的完整边界**。只允许在引文范围内核对与归类，**不得向引文之外延伸推理**（引文之后的谱面内容属于其他配置，未经讲授不得擅自归类）；发现疑问时先向用户确认，不得据此质疑用户提供的数据。
 10. **不擅自开工**：待办/研究方向仅在用户明确要求时启动；宣布"即将开始某项工作"同样视为越界——先问，再动。
+11. **谱面参考只看官方谱**（用户 2026-09-11 明确）：谱面设计的参考、统计与评测 ground truth 一律只用 `resource/official-chart/` 的官方谱；用户的自制谱（`~/Desktop/self-charts` 等）**不得**作为谱面参考或评测依据，其 `track.mp3` 仅可作音频分析的测试音频，且 `maidata.txt` 只读头部 `&first` 与首个 `(BPM)`，正文不读不引用不评价。官方谱目前没有对应音频，"音频 × 官方谱密度"的配对标定须等用户提供音频后再做。
 
 ## 参考资源（持续补充）
 

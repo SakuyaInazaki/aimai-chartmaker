@@ -20,7 +20,7 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 
 ## 当前状态
 
-🛠️ **知识与工具建设期**（阶段划分以 [AGENT.md](AGENT.md) 为准，最后更新 2026-09-10）
+🛠️ **知识与工具建设期**（阶段划分以 [AGENT.md](AGENT.md) 为准，最后更新 2026-09-11）
 
 **已完成**
 
@@ -28,17 +28,19 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [x] 调研 simai 语法规范 → [`docs/simai-syntax.md`](docs/simai-syntax.md)（v1.0 定稿）
 - [x] 调研 simai 报错/警告判定逻辑（以成熟解析器实际实现为准）→ [`docs/simai-error-checking.md`](docs/simai-error-checking.md)（v1.0 定稿）
 - [x] ST 谱面要素年表（只做 FiNALE 及以前的旧框要素）→ [`docs/st-chart-elements.md`](docs/st-chart-elements.md)
-- [x] 音频分析管线技术路线定稿（四层工具选型，许可证已核实）→ [`docs/audio-analysis.md`](docs/audio-analysis.md)
+- [x] 音频分析管线设计 **v1.1**（四层选型 + 量化规则 / offset 校验 / 结构标签 / 强度→密度映射 / song sheet；许可证已核实）→ [`docs/audio-analysis.md`](docs/audio-analysis.md)；第二轮调研 → [`docs/research/audio-analysis-research-v2.md`](docs/research/audio-analysis-research-v2.md)
+- [x] 音频分析**原型**（mp3 + BPM/first → 分轨 onset 网格串 / 结构分段 / 强度曲线 → song sheet）→ [`tools/audio_analysis/`](tools/audio_analysis/)
+- [x] 官方谱逐小节**密度基准**（simai 解析器 + 388 谱密度曲线实测，标定强度→密度映射）→ [`tools/chart_analysis/`](tools/chart_analysis/)、[`docs/research/official-chart-density-curves.md`](docs/research/official-chart-density-curves.md)
 - [x] 官方谱配置分布扫描：本地 388 个官方 ST 谱 → [`docs/research/config-usage-survey.md`](docs/research/config-usage-survey.md)（agent 观察，待用户确认）
 - [x] 官方谱逐谱精读：本地 14 级 **87 个谱面文件全部读完**（配置构成 / 强度难度分布 / 可复用手法 / 存疑）→ [`docs/research/level14-readings.md`](docs/research/level14-readings.md)
-- [x] 制谱认知知识库 **30 条**原子条目（用户逐条讲授 + 官方谱实证验证）→ [`.agent/knowledge/`](.agent/knowledge/)
-- [x] 过程记录与变更日志 **33 篇**（编号 001–033）→ [`.agent/notes/`](.agent/notes/)
+- [x] 制谱认知知识库 **31 条**原子条目（用户逐条讲授 + 官方谱实证验证）→ [`.agent/knowledge/`](.agent/knowledge/)
+- [x] 过程记录与变更日志 **38 篇**（编号 001–038）→ [`.agent/notes/`](.agent/notes/)
 
 **进行中 / 下一步**
 
 - [ ] 跨谱通用装置整理进 `.agent/knowledge/`（**星星（slide）相关需等用户讲授判断标准后再定性**）
 - [ ] 逐谱精读向 13 级及以下扩展（待用户安排）
-- [ ] 分析工具落地实现（节拍 / 分轨 onset / 结构分段 / 强度曲线）
+- [ ] 分析工具迭代与标定（basic-pitch 装包、结构标签人工复核、RWC-Pop / osu2beat2025 评测、强度权重标定需官方音频）
 - [ ] 谱面生成 → 校验链路（四层校验蓝本见 `docs/simai-error-checking.md` §10）
 - [ ] 拿到 mp3 后的完整操作 SOP（工作流指引）
 
@@ -48,7 +50,9 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 |---|---|
 | [`AGENT.md`](AGENT.md) | 项目概述、当前阶段、工作准则（coding agent 必读） |
 | [`docs/`](docs/) | 定稿文档：simai 语法 / 报错判定 / ST 谱面要素 / 音频分析 |
-| [`docs/research/`](docs/research/) | 调研报告 + 官方谱扫描 + 14 级逐谱精读记录 |
+| [`docs/research/`](docs/research/) | 调研报告 + 官方谱扫描 + 14 级逐谱精读记录 + 官方谱密度曲线实测 |
+| [`tools/`](tools/) | 分析工具：`audio_analysis/`（音频分析原型）、`chart_analysis/`（simai 解析器与密度统计） |
+| [`tests/`](tests/) | 单元测试（自写 simai 片段 + 合成音频，不含真实音频/官方谱原文） |
 | [`.agent/knowledge/`](.agent/knowledge/) | 制谱认知知识库（原子条目，含日期/理由/来源/置信度/修订记录） |
 | [`.agent/notes/`](.agent/notes/) | 过程记录与变更日志（编号索引见其 README） |
 | `resource/` | 用户提供的参考资料与**本机专用**数据（官方谱面、预览镜像），**不入库** |

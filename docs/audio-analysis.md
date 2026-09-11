@@ -589,33 +589,34 @@ bar 33 | サビ | I=0.90 | div=16 | drum  X...x...X...x...
 
 ## 11. 当前实现状态（v1.1 新增）
 
-### 11.1 `tools/audio_analysis`（原型 v0.1，2026-09-11）
+### 11.1 `tools/audio_analysis`（原型 v0.2，2026-09-11；v0.1 见 note 035，v0.2 见 note 038）
 
-用法：`python -m tools.audio_analysis --audio <mp3> --bpm <BPM> --first <秒> --out out/<song>/`
-输出：`track.44k.wav` / `stems/*.wav` / `analysis.json` / `song-sheet.md` / `plot.png`。
-测试：`tests/test_audio_analysis.py` 27 用例，**全部用 numpy 合成音频**（仓库不放真实音频，AGENT 准则 5）。
+用法：`python -m tools.audio_analysis --audio <mp3> --bpm <BPM> --first <秒> [--level 13.5] --out out/<song>/`
+输出：`track.44k.wav` / `stems/*.wav` / `song_analysis.json` / `song_sheet.md` / `plot.png`（旧名 `analysis.json` / `song-sheet.md` 同时写出保持兼容）。
+测试：`tests/test_audio_analysis.py` 65 用例，**全部用 numpy 合成音频**（仓库不放真实音频，AGENT 准则 5）。
 
-**已实现（L1–L3）**
+**已实现**
 
 | 模块 | 对应本文 | 状态 |
 |---|---|---|
 | `decode.py` | §2.1 统一解码 + ffprobe `start_time` | ✅ |
-| `grid.py` | §2.2 网格构造（含负 first、实验性变速）+ §2.4 offset 校验（onset-fit + 包络双输出、整拍歧义分组取峰） | ✅ |
-| `stems.py` | §3.1 Demucs 四轨（MPS 优先、失败回退 CPU、记录设备耗时） | ✅ |
-| `onsets.py` | §3.2 逐 stem onset + §3.3 鼓件频带启发式 + §3.4 人声 VAD | ✅（启发式，标存疑） |
-| `quantize.py` | §2.5 逐小节最小分音 + 网格串 + 误差统计 | ✅（高 BPM 不可靠） |
-| `structure.py` | §4.2 all-in-one 主线 + 自研 SSM 退路 + **分段可用性体检** + `alt_segments` | ✅ |
-| `intensity.py` | §4.5 强度曲线 + §4.6 高潮投票 | ⚠️ 跑的仍是 **v1.0 的四项融合式与四票**，v1.1 新配方未实现 |
-| `sheet.py` | §5.4 输出 | ⚠️ 产出 `analysis.json` + `song-sheet.md` + `plot.png`，但字段未对齐 §5.4 的 song sheet 规范 |
+| `grid.py` | §2.2 网格构造（含负 first、实验性变速）+ §2.4 offset 校验（onset-fit，整拍歧义分组取峰） | ✅ |
+| `stems.py` | §3.1 Demucs 四轨（MPS 优先、失败回退 CPU） | ✅ |
+| `onsets.py` | §3.2 逐 stem onset + §3.3 鼓件频带启发式 + §3.4 人声 VAD | ✅（零模型启发式） |
+| `quantize.py` | §2.5 全套：1/48 拍重采样、**每小节单一分音**、`τ=clamp(0.25·slot,12,30)`、三连门、**`{32}` 红线**、未落格 onset 如实统计 | ✅（实测未落格 7–19%，见下） |
+| `features.py` | §3.2 逐小节特征清单（share / n_onset / grid_fit / voiced_ratio / kick-snare-hihat / riff_sim / sil_run） | ✅ |
+| `structure.py` | §4.2 三路边界投票（all-in-one-infer + novelty + 重复段，吸附小节线）+ §4.3 日式(英文)双标签 + §4.4 `pre_chorus` 派生 + `chorus_index` / `repeat_of` / `upgrade` / `rest` / `final_chorus` / `quiet_chorus` / 器乐向 `drop` | ✅（标签须人工对图复核） |
+| `intensity.py` | §4.5 五项融合式 + §4.6 五票 + §4.7 密度地板映射（`--level` 取官方均值 note/小节） | ✅（权重为初值） |
+| `stemplan.py` | §5.2 八条「段落×特征→主踩音轨」规则 + 切轨触发 / 降级 / 单轨警告 | ✅ |
+| `tracks.py` / `sheet.py` | §5.4 song sheet 双格式：4 轨 `drum/vocal/bass/hook`、字符集 `X x - .`、行自包含、Header 硬约束与分音统计 | ✅ |
+
+**v0.2 实测（3 首测试曲，BPM 148–192）**：`{32}`/`{24}` 从输出中消失（红线拦下 9–21 小节/曲）；分音以 `{16}` 为主（92–100%）；**未落格 onset 6.9% / 13.1% / 18.6%**——v0.1 报的"全部可解"是容差过宽造成的假象；78–87% 的小节走"找不到合法分音、压到上限"分支，因为四轨并集每小节中位 15–22 个 onset、非鼓轨定位误差 15–33 ms（上游解法是 basic-pitch 给出人声 note 事件，不是放宽容差）。强度曲线 v0.1 的 raw/smoothed 偏离根因是**双重归一**（bar_raw 未归一、平滑后又 min-max），已修并加回归测试。
 
 **未实现清单**
 
-- §4.5 的新融合式（5 项）与 §4.6 的第五票（人声票）；
-- §4.7 的 `T_density` 形状先验、密度地板映射、六条密度规律的规则化；
-- §4.8(B) 分位映射 `F_chart⁻¹∘F_audio`；(D) 人工听审校验；
-- **L4 规划层整层**（§5.2 规则表、§5.3 决策步骤、`song_analysis.json` 规范字段、`upgrade`/`rest`/`chorus_index`/`labels_ja`）；
-- §4.3 日式(英文)双标签词表的归并映射；
-- basic-pitch 人声 note 事件（§3.5，装不上）；SongFormer 二号意见（§4.2）；三路投票（当前只有主线 + SSM 两路）。
+- §4.8(B) 分位映射 `F_chart⁻¹∘F_audio`（当前只有 §4.7 的地板线性映射）；(D) 人工听审校验；(E) 配对标定（无官方音频）；
+- basic-pitch 人声 note 事件（§3.5，`resolution-too-deep` 装不上）；SongFormer 二号意见（§4.2）；
+- 器乐向阈值（voiced 能量占比 0.18）、chorus 护栏、器乐曲强度分档阈值只在 3 首上试过，无实证。
 
 ### 11.2 `tools/chart_analysis`（已完成，2026-09-11）
 
