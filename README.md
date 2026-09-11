@@ -31,11 +31,11 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [x] 音频分析管线设计 **v1.1**（四层选型 + 量化规则 / offset 校验 / 结构标签 / 强度→密度映射 / song sheet；许可证已核实）→ [`docs/audio-analysis.md`](docs/audio-analysis.md)；第二轮调研 → [`docs/research/audio-analysis-research-v2.md`](docs/research/audio-analysis-research-v2.md)
 - [x] 音频分析**原型**（mp3 + BPM/first → 分轨 onset 网格串 / 结构分段 / 强度曲线 → song sheet）→ [`tools/audio_analysis/`](tools/audio_analysis/)
 - [x] 官方谱逐小节**密度基准**（simai 解析器 + 388 谱密度曲线实测，标定强度→密度映射）→ [`tools/chart_analysis/`](tools/chart_analysis/)、[`docs/research/official-chart-density-curves.md`](docs/research/official-chart-density-curves.md)
-- [x] 官方音频 × 官方谱**配对标定与切轨验证**（8 首，本机私有数据）→ [`tools/calibration/`](tools/calibration/)、[`docs/research/audio-chart-calibration.md`](docs/research/audio-chart-calibration.md)
+- [x] 官方音频 × 官方谱**配对标定与切轨验证**（**40 首**官方 ST 曲，本机私有数据）→ [`tools/calibration/`](tools/calibration/)、[`docs/research/audio-chart-calibration-n40.md`](docs/research/audio-chart-calibration-n40.md)（n=8 版见 [`audio-chart-calibration.md`](docs/research/audio-chart-calibration.md)）
 - [x] 官方谱配置分布扫描：本地 388 个官方 ST 谱 → [`docs/research/config-usage-survey.md`](docs/research/config-usage-survey.md)（agent 观察，待用户确认）
 - [x] 官方谱逐谱精读：本地 14 级 **87 个谱面文件全部读完**（配置构成 / 强度难度分布 / 可复用手法 / 存疑）→ [`docs/research/level14-readings.md`](docs/research/level14-readings.md)
 - [x] 制谱认知知识库 **32 条**原子条目（用户逐条讲授 + 官方谱实证验证）→ [`.agent/knowledge/`](.agent/knowledge/)
-- [x] 过程记录与变更日志 **41 篇**（编号 001–041）→ [`.agent/notes/`](.agent/notes/)
+- [x] 过程记录与变更日志 **42 篇**（编号 001–042）→ [`.agent/notes/`](.agent/notes/)
 
 **进行中 / 下一步**
 

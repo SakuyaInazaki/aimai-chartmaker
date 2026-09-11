@@ -41,8 +41,8 @@
   - **官方谱逐小节密度基准** → `tools/chart_analysis/`（simai 时间轴解析器，387/388 零错，manifest 对账 97.2%）+ `docs/research/official-chart-density-curves.md`（388 谱密度曲线：五段模板实测、密度地板、末段最强、休息段规律；结论入库为知识 **031**，知识 001 相应修订）；
   - **设计定稿 v1.1** → `docs/audio-analysis.md`（合并上述全部证据与原型实测；当前实现状态见其 §11）；
   - **原型** → `tools/audio_analysis/`（mp3 + BPM/first → 统一解码 → offset 校验 → Demucs 分轨 → 逐 stem onset 量化网格串 → 结构分段 → 强度曲线 → song sheet 双格式 + 复核图；3 首测试曲实跑，合成音频单测全绿）；
-  - **官方音频配对标定**（用户提供 8 首官方 ST 谱 zip → 本机 `official-mp3/`，不入库）→ `tools/calibration/` + `docs/research/audio-chart-calibration.md`：强度×密度逐小节 ρ 0.454 / 逐段 0.523，权重留一曲 CV 未显著优于初值故不换；各 stem 命中率（鼓骨架 recall 0.607，只落人声 3.2%）与切轨规则表一致率；候选池 recall 0.82 / precision 0.55；388 谱结尾形态尾杀 65% / 渐弱 1% / 其他 34%（知识 031 §10）；
-  - 过程记录：notes 034–041。
+  - **官方音频配对标定（n=8 → n=40）**（用户提供 40 首官方 ST 谱 zip → 本机 `official-mp3/`，不入库；**只用 ST，DX 不用**）→ `tools/calibration/` + `docs/research/audio-chart-calibration-n40.md`（n=8 版 `audio-chart-calibration.md` 保留作对照）：强度×密度逐小节 ρ **0.226** / 逐段 0.320（n=8 的 0.45 是小样本偏高），**器乐曲 0.399 vs 人声曲 0.146**——人声曲密度跟唱词句读走，是加样本解决不了的结构性瓶颈；强度融合默认权重首次按数据替换（`[0,0.19,0.07,0,0.74]`，LOSO 40 折 +0.076、32/40 折胜出、p=0.0002）；鼓骨架 recall 0.639、只落人声 3.2%、候选池 recall 0.84 / precision 0.55；骨架+点缀模型 85.2% 胜常数基线；副歌人声领先仅 4/88 段（人声曲 4/66）→ 知识 002 该条降级存疑；388 谱结尾形态尾杀 65% / 渐弱 1% / 其他 34%（知识 031 §10）；
+  - 过程记录：notes 034–042。
 - [x] 调研 simai 语法规范，产出文档 `docs/simai-syntax.md`（v1.0 定稿，2026-09-10）：
   - 三路调研合流：官方 simai wiki（记法定义者 Celeca 规范）+ 社区解析器源码 + 中文社区教程；
   - 原始调研报告存档于 `docs/research/`（official-spec-research.md / parser-source-analysis.md / chinese-community-research.md）；
@@ -63,7 +63,7 @@
     **只算原文记录，不得作为结论写入知识库**。
 - [ ] **逐谱精读向 13 级及以下扩展**（待用户安排；14 级已读完）
 - [ ] **分析工具迭代与标定**（原型已可用；待做：`basic-pitch` 装包、结构标签与人声侧归因的人工听审复核、RWC-Pop / osu2beat2025 评测协议 A/B 档、更多官方音频下的权重标定；清单见 `docs/audio-analysis.md` §9/§10）
-- [ ] **待用户拍板**：① CC BY 4.0 是否纳入依赖白名单（决定 SongFormer 去留）；② 知识 002「副歌全踩人声」在 8 首官方曲的代理实测下降为条件性并标存疑（见知识 032），需用户听审裁定；③ 若能再提供更多官方音频（尤其人声主导曲），可把 n=8 的标定与切轨验证做实
+- [ ] **待用户拍板**：① CC BY 4.0 是否纳入依赖白名单（决定 SongFormer 去留）；② 知识 002「副歌全踩人声」在 40 首官方曲的代理实测下（人声曲也只有 4/66 段人声领先）仍只降级存疑、未改原文，需用户听审裁定；③ 下一轮该补的不是更多曲子而是**真人声 ground truth**（basic-pitch / RMVPE 的人声 note 事件），以突破人声曲 ρ 0.146 的瓶颈——是否投入
 - [ ] **工作流指引**：拿到 mp3 后的完整操作 SOP（串联分析与创作）
 
 ## 技术路线（v1.1，2026-09-11；详见 `docs/audio-analysis.md`）
