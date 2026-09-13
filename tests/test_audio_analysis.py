@@ -459,7 +459,8 @@ def test_section_floor_is_a_parameter_not_a_constant():
     dn_default, _ = intensity.density_map(I, intensity.SECTION_DENSITY_FLOOR, 9.15)
     dn_calib, _ = intensity.density_map(I, intensity.CALIBRATED_SECTION_FLOOR, 9.15)
     assert dn_default[0] == pytest.approx(0.60)
-    assert dn_calib[0] == pytest.approx(0.365)   # n=40 池化最优（n=8 的 0.125 已被推翻）
+    # n=160 池化最优（n=8 的 0.125、n=40 的 0.365 依次被更大样本取代）
+    assert dn_calib[0] == pytest.approx(0.330)
     assert dn_default[1] == dn_calib[1] == pytest.approx(1.0)
 
 

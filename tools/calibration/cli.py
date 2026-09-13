@@ -313,8 +313,17 @@ def analyze_song(bundle, tol: float = stemhit.DEFAULT_TOL_SEC) -> dict:
             t0 = grid.bar_start(bar)
             cand.extend(t0 + (np.asarray(sl, dtype=float) * bd / d))
     cand_t = stemhit.unique_times(np.asarray(cand, dtype=float), merge_sec=0.005)
-    pool = stemhit.hit_stat(slot_adj, cand_t, tol=tol, span_sec=song_span)
-    pool_stat = {"n_candidates": int(cand_t.size), **pool.to_dict()}
+    # ⚠️ 候选池比的是**未做 φ 补偿**的官方时间槽（n=160 修正）：
+    # φ* 补偿的是"音频 onset 相对谱面时钟的解码延迟"，对 stem onset 的比较是对的；
+    # 但候选池是**量化落格后的网格位置**，网格锚在用户给的 `&first` 上，与官方 note
+    # 本来就同一个时钟——再平移一次反而把官方 note 推离网格。
+    # n=40 时最大 |φ*| 只有 25 ms，问题被 30 ms 容差盖住了；n=160 里
+    # L4TS2018（φ* = −37.5 ms）的候选池 recall 被压到 0.003 才暴露出来。
+    pool = stemhit.hit_stat(slot_times, cand_t, tol=tol, span_sec=song_span)
+    pool_shifted = stemhit.hit_stat(slot_adj, cand_t, tol=tol, span_sec=song_span)
+    pool_stat = {"n_candidates": int(cand_t.size), **pool.to_dict(),
+                 "recall_phi_shifted": pool_shifted.recall,
+                 "precision_phi_shifted": pool_shifted.precision}
 
     # ---- 9. 结尾形态（本曲）----
     endings = {str(n): ending_mod.classify_ending(d_bar, tail_bars=n).to_dict()
@@ -335,7 +344,7 @@ def analyze_song(bundle, tol: float = stemhit.DEFAULT_TOL_SEC) -> dict:
 
     return {
         "name": bundle.name, "level": bundle.level, "bpm": bundle.bpm,
-        "first": bundle.first,
+        "first": bundle.first, "genre": getattr(bundle, "genre", "") or "",
         "n_bars_audio": grid.n_bars, "n_measures_chart": len(stats),
         "n_bars_paired": len(bars),
         "notes_total": int(bundle.parse.counts["notes"]),
@@ -374,6 +383,23 @@ def analyze_song(bundle, tol: float = stemhit.DEFAULT_TOL_SEC) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _vocal_led_share() -> float:
+    """现役人声主导阈值（`stemplan.VOCAL_LED_SHARE`）。用它当阈值扫描的对照点。"""
+    _ensure_paths()
+    from tools.audio_analysis import stemplan as stemplan_mod
+    return float(stemplan_mod.VOCAL_LED_SHARE)
+
+
+def _cross_table(rows: list[dict], key_a: str, key_b: str) -> dict[str, dict[str, int]]:
+    """两个分层键的交叉计数表（n=160 用来看六曲风 × 人声/器乐的分布）。"""
+    out: dict[str, dict[str, int]] = {}
+    for r in rows:
+        a, b = str(r.get(key_a, "")), str(r.get(key_b, ""))
+        out.setdefault(a, {})
+        out[a][b] = out[a].get(b, 0) + 1
+    return out
+
+
 def build_strata(songs: list[dict], calib) -> dict:
     """n=40 的分层统计：曲目画像 → 按人声/定数/BPM 分层 → 阈值扫描 → 切轨模型对照。
 
@@ -386,6 +412,8 @@ def build_strata(songs: list[dict], calib) -> dict:
         p = profiles[s["name"]]
         song_rows.append({
             "song": s["name"], "kind": p["kind"],
+            "genre": strata.genre_band(s.get("genre", "")),
+            "genre_short": strata.genre_short(s.get("genre", "")),
             "level_band": strata.level_band(s["level"]),
             "bpm_band": strata.bpm_band(s["bpm"]),
             "rho_bar": s["corr"]["spearman_smooth"],
@@ -436,6 +464,19 @@ def build_strata(songs: list[dict], calib) -> dict:
         "by_kind_rho_section": strata.stratify(song_rows, "kind", "rho_section"),
         "by_level_rho_bar": strata.stratify(song_rows, "level_band", "rho_bar"),
         "by_bpm_rho_bar": strata.stratify(song_rows, "bpm_band", "rho_bar"),
+        # ---- n=160 新增：官方 `&genre` 六曲风分层 ----
+        "by_genre_rho_bar": strata.stratify(song_rows, "genre", "rho_bar"),
+        "by_genre_rho_section": strata.stratify(song_rows, "genre", "rho_section"),
+        "by_genre_recall_drums": strata.stratify(song_rows, "genre", "recall_drums",
+                                                 agg="mean"),
+        "by_genre_recall_vocals": strata.stratify(song_rows, "genre", "recall_vocals",
+                                                  agg="mean"),
+        "by_genre_none_share": strata.stratify(song_rows, "genre", "none_share",
+                                               agg="mean"),
+        "by_genre_share_vocals": strata.stratify(song_rows, "genre", "share_vocals",
+                                                 agg="mean"),
+        "genre_kind_cross": _cross_table(song_rows, "genre", "kind"),
+        "box_rho_by_genre": strata.boxplot_groups(song_rows, "genre_short", "rho_bar"),
         "by_kind_recall_vocals": strata.stratify(song_rows, "kind", "recall_vocals",
                                                  agg="mean"),
         "by_kind_recall_drums": strata.stratify(song_rows, "kind", "recall_drums",
@@ -479,9 +520,14 @@ def build_strata(songs: list[dict], calib) -> dict:
             "joint_share_onset": strata.sweep_two_thresholds(
                 [r["share_vocals"] for r in sweep_src],
                 [r["onset_ratio"] for r in sweep_src], lab),
-            "current_0.45_0.65": strata.evaluate_fixed_two(
+            "legacy_0.45_0.65": strata.evaluate_fixed_two(
                 [r["voiced"] for r in sweep_src],
                 [r["onset_ratio"] for r in sweep_src], lab, 0.45, 0.65),
+            # n=160 新增：现役判据（stemplan.VOCAL_LED_SHARE，n=40 标定出来的 0.14）
+            # 在新样本上的表现——"要不要再换阈值"必须拿现役值当对照。
+            "current_share": strata.evaluate_fixed_one(
+                [r["share_vocals"] for r in sweep_src], lab,
+                _vocal_led_share()),
         },
         "agreement_all": strata.agreement_table(seg_rows_all),
         "agreement_by_function": {
@@ -543,9 +589,41 @@ def corpus_endings(tails=(6, 8, 12)) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def write_csv(path: Path, songs: list[dict], kinds: dict | None = None) -> None:
+def _segment_digest(song: dict) -> dict:
+    """逐段行的**曲级汇总列**（n=160 新增）。
+
+    n=160 的逐段行有 2000+ 行、CSV 会涨到 600 KB 以上，超过交付物 300 KB 的上限，
+    所以 `include_segments=False` 时逐段信息压成这几列写在逐曲行上，
+    段落级明细仍然完整保留在 metrics JSON 里。
+    """
+    segs = song.get("audio_segments", []) or []
+    if not segs:
+        return {}
+    best = [r.get("best_stem", "") for r in segs]
+    agree = [r.get("plan_agree") for r in segs if r.get("plan_agree") is not None]
+    agree2 = [r.get("plan_agree_top2") for r in segs
+              if r.get("plan_agree_top2") is not None]
+    return {
+        "n_segments": len(segs),
+        "seg_best_drums": best.count("drums"),
+        "seg_best_other": best.count("other"),
+        "seg_best_vocals": best.count("vocals"),
+        "seg_best_bass": best.count("bass"),
+        "seg_plan_agree": round(float(np.mean(agree)), 4) if agree else "",
+        "seg_plan_agree_top2": round(float(np.mean(agree2)), 4) if agree2 else "",
+    }
+
+
+def write_csv(path: Path, songs: list[dict], kinds: dict | None = None,
+              include_segments: bool = True) -> None:
+    """写逐曲（+ 可选逐段）小表。
+
+    `include_segments=False` 时只写逐曲行，逐段信息压成 `_segment_digest` 的汇总列
+    （n=160 的体积对策，见该函数文档）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    cols = ["scope", "song", "level", "bpm", "kind", "seg_index", "start_bar", "end_bar",
+    cols = ["scope", "song", "genre", "level", "bpm", "kind", "seg_index",
+            "start_bar", "end_bar",
             "function", "label_ja", "n_bars", "notes_total", "n_events",
             "align_err_ms", "phi_star_ms", "offset_delta_ms",
             "spearman_raw", "spearman_smooth", "spearman_weighted", "pearson_smooth",
@@ -563,7 +641,10 @@ def write_csv(path: Path, songs: list[dict], kinds: dict | None = None) -> None:
             "prec_vocals",
             "lift_drums", "lift_bass", "lift_other", "lift_vocals",
             "none_share", "pool_precision", "ending_label", "tail_ratio",
-            "section_spearman"]
+            "section_spearman",
+            # n=160 新增：曲风硬标签 + 逐段汇总列（只在 include_segments=False 时有值）
+            "n_segments", "seg_best_drums", "seg_best_other", "seg_best_vocals",
+            "seg_best_bass", "seg_plan_agree", "seg_plan_agree_top2"]
     with path.open("w", newline="", encoding="utf-8") as fh:
         raw = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
 
@@ -589,7 +670,9 @@ def write_csv(path: Path, songs: list[dict], kinds: dict | None = None) -> None:
             w.writerow({
                 "song_kind": kinds.get(s["name"], ""),
                 "scope": "song", "song": s["name"], "level": s["level"], "bpm": s["bpm"],
+                "genre": s.get("genre", ""),
                 "kind": "", "n_bars": s["n_bars_paired"],
+                **({} if include_segments else _segment_digest(s)),
                 "notes_total": s["notes_total"], "n_events": s["n_slots"],
                 "align_err_ms": s["align_err_ms"], "phi_star_ms": s["phi_star_ms"],
                 "offset_delta_ms": s["offset_check_delta_ms"],
@@ -613,10 +696,13 @@ def write_csv(path: Path, songs: list[dict], kinds: dict | None = None) -> None:
                 "prec_vocals": s["global_stem"]["vocals"]["precision"],
                 **{f"lift_{k}": s["global_stem"][k]["lift"] for k in STEMS},
             })
+            if not include_segments:
+                continue
             for r in s["audio_segments"] + s["chart_segments"]:
                 w.writerow({
                     "scope": "segment", "song": s["name"], "level": s["level"],
-                    "bpm": s["bpm"], "kind": r["kind"], "seg_index": r["seg_index"],
+                    "bpm": s["bpm"], "genre": s.get("genre", ""),
+                    "kind": r["kind"], "seg_index": r["seg_index"],
                     "start_bar": r["start_bar"], "end_bar": r["end_bar"],
                     "function": r.get("function", ""), "label_ja": r.get("label_ja", ""),
                     "n_bars": r["end_idx"] - r["start_idx"] + 1,
@@ -680,7 +766,11 @@ def write_overlay(path: Path, song: dict) -> None:
 
 
 def write_summary_plot(path: Path, summary: dict) -> None:
-    """全样本总览图：ρ 分布直方图 + 三张分层箱线图（人声/定数/BPM）。"""
+    """全样本总览图：ρ 分布直方图 + 四张分层箱线图（曲风 / 定数 / BPM / 人声器乐）。
+
+    n=160 起曲风箱线图排在第一位——官方 `&genre` 是硬标签，比 `share_vocals`
+    这个音频侧代理更可信。
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -688,7 +778,7 @@ def write_summary_plot(path: Path, summary: dict) -> None:
     st = summary.get("strata", {})
     rho = [v for v in summary.get("spearman_smooth_per_song", []) if v is not None]
     sec = [v for v in summary.get("section_spearman_per_song", []) if v is not None]
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(19, 9))
 
     ax = axes[0][0]
     bins = np.arange(-1.0, 1.0001, 0.1)
@@ -708,7 +798,8 @@ def write_summary_plot(path: Path, summary: dict) -> None:
     ax.set_ylabel("曲数")
     ax.legend(fontsize=8)
 
-    for ax, key, title in ((axes[0][1], "box_rho_by_kind", "按人声/器乐分层"),
+    for ax, key, title in ((axes[0][1], "box_rho_by_genre", "按官方六曲风分层"),
+                           (axes[0][2], "box_rho_by_kind", "按人声/器乐分层"),
                            (axes[1][0], "box_rho_by_level", "按定数档分层"),
                            (axes[1][1], "box_rho_by_bpm", "按 BPM 段分层")):
         groups = st.get(key, {})
@@ -720,11 +811,30 @@ def write_summary_plot(path: Path, summary: dict) -> None:
             for i, vals in enumerate(data, start=1):
                 ax.scatter(np.full(len(vals), i) + np.random.default_rng(0).normal(
                     0, 0.04, len(vals)), vals, s=12, color="#636e72", alpha=0.6, zorder=3)
+            if key == "box_rho_by_genre":
+                ax.tick_params(axis="x", labelrotation=30, labelsize=7)
         ax.axhline(float(summary.get("spearman_smooth_fisher", np.nan)),
                    color="#0984e3", ls=":", lw=1.0)
         ax.set_title(f"逐小节 ρ — {title}", fontsize=10)
         ax.set_ylabel("Spearman ρ")
         ax.set_ylim(-0.6, 0.9)
+
+    # 第 6 格：逐曲 ρ 对 share_vocals 的散点（人声占比越高越难预测）
+    ax = axes[1][2]
+    rows = st.get("song_rows", [])
+    xs = [r.get("share_vocals") for r in rows]
+    ys = [r.get("rho_bar") for r in rows]
+    pts = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+    if pts:
+        ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=16,
+                   color="#00b894", alpha=0.75)
+        ax.axvline(strata.VOCAL_SONG_SHARE, color="#d63031", ls="--", lw=1.0,
+                   label=f"share_vocals={strata.VOCAL_SONG_SHARE}")
+        ax.legend(fontsize=8)
+    ax.axhline(0.0, color="#636e72", ls=":", lw=1.0)
+    ax.set_title("逐曲 ρ vs vocals 能量占比", fontsize=10)
+    ax.set_xlabel("share_vocals（曲内均值）")
+    ax.set_ylabel("Spearman ρ")
 
     fig.suptitle(f"官方音频 × 官方谱配对标定 n={summary.get('n_songs')}", fontsize=12)
     fig.tight_layout()
@@ -761,6 +871,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "见 tools/audio_analysis/README.md v0.5）")
     p.add_argument("--v5-only", action="store_true",
                    help="只跑 v0.5 标定，跳过 n=40 的既有全套（省时间）")
+    p.add_argument("--csv-no-segments", action="store_true",
+                   help="CSV 只写逐曲行（逐段压成汇总列）。n=160 的逐段行有 2000+ 行、"
+                        "CSV 会超过交付物 300 KB 上限，段落明细仍在 metrics JSON 里")
+    p.add_argument("--overlay-songs", default=None,
+                   help="只给这些曲子画 <曲名>-overlay.png（逗号分隔）。"
+                        "缺省时全部都画（n=160 会写 160 张图）")
     return p
 
 
@@ -842,8 +958,18 @@ def run(args: argparse.Namespace) -> dict:
             return v5_out
 
     calib = weights_mod.calibrate(datasets, alpha=args.ridge_alpha)
+    # n=160 新增：LOSO 的对照基线再跑一遍，这次用**当前默认权重**（= n=40 标定值）。
+    # `calib` 的 rho_init 用的是 v0.1–v0.3 手写初值，与 n=40 报告口径一致；
+    # 但"要不要**再**换一次权重"的判据必须拿现役默认值当基线，否则是跟一个
+    # 早就不用的权重比。两套都写进 metrics，报告里分开引。
+    from tools.audio_analysis import intensity as intensity_mod
+    calib_vs_current = weights_mod.calibrate(
+        datasets, alpha=args.ridge_alpha,
+        initial=dict(intensity_mod.DEFAULT_FUSION_WEIGHTS))
     presets = weights_mod.evaluate_presets(datasets, {
         "initial": dict(weights_mod.INITIAL_WEIGHTS),
+        # 现役默认（n=40 标定值），n=160 的对照锚点
+        "current_default": dict(intensity_mod.DEFAULT_FUSION_WEIGHTS),
         "calibrated_all": calib.weights_all or dict(weights_mod.INITIAL_WEIGHTS),
         # 可解释候选：把对密度毫无贡献的 voiced 权重挪给 flux
         "voiced_to_flux": {"loudness": 0.25, "onset": 0.30, "drums": 0.20,
@@ -878,6 +1004,10 @@ def run(args: argparse.Namespace) -> dict:
         "bias_notes": [round(s["floor"]["bias"], 3) for s in songs],
         "floor_fit": [s["floor"]["floor_fit_bar"] for s in songs],
         "calibration": calib.to_dict(),
+        "calibration_vs_current": calib_vs_current.to_dict(),
+        "weight_switch_vs_current": strata.weight_switch_verdict(
+            [f.rho_fit for f in calib_vs_current.folds],
+            [f.rho_init for f in calib_vs_current.folds]),
         "weight_presets": presets,
     }
     # 逐段落类型的切轨归因（切轨验证的核心表）
@@ -982,13 +1112,19 @@ def run(args: argparse.Namespace) -> dict:
     out = {"summary": summary, "songs": songs, "corpus_endings": corpus}
 
     write_csv(Path(args.csv), songs,
-              kinds={k: v["kind"] for k, v in summary["strata"]["vocal_profiles"].items()})
+              kinds={k: v["kind"] for k, v in summary["strata"]["vocal_profiles"].items()},
+              include_segments=not getattr(args, "csv_no_segments", False))
     print(f"[输出] CSV → {args.csv}")
     if args.plots:
         pd = Path(args.plots)
+        want = getattr(args, "overlay_songs", None)
+        want_set = {x.strip() for x in want.split(",") if x.strip()} if want else None
         for s in songs:
-            if not s.get("error"):
-                write_overlay(pd / f"{s['name']}-overlay.png", s)
+            if s.get("error"):
+                continue
+            if want_set is not None and s["name"] not in want_set:
+                continue
+            write_overlay(pd / f"{s['name']}-overlay.png", s)
         write_summary_plot(pd / "summary.png", summary)
         print(f"[输出] 叠加图 + summary.png → {pd}")
     if args.metrics:

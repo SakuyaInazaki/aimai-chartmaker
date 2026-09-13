@@ -59,6 +59,39 @@ def level_band(level: float) -> str:
     return "14.3-14.5"
 
 
+#: 官方六曲风（`&genre`）的显示顺序。n=160 的 120 首新曲正是按这六类分层选取的。
+#: 官方写法用的是全角 `＆`，这里按原字符串比对，别的写法一律落到 `其他`。
+GENRE_ORDER = (
+    "maimai",
+    "niconico＆ボーカロイド",
+    "ゲーム＆バラエティ",
+    "東方Project",
+    "オンゲキ＆CHUNITHM",
+    "POPS＆アニメ",
+)
+#: 画图/表头用的短名（日文全角在 matplotlib 默认字体下会变豆腐块）
+GENRE_SHORT = {
+    "maimai": "maimai",
+    "niconico＆ボーカロイド": "niconico/VOCALOID",
+    "ゲーム＆バラエティ": "GAME/VARIETY",
+    "東方Project": "TOUHOU",
+    "オンゲキ＆CHUNITHM": "ONGEKI/CHUNITHM",
+    "POPS＆アニメ": "POPS/ANIME",
+    "其他": "OTHER",
+}
+
+
+def genre_band(genre: str) -> str:
+    """官方 `&genre` 归一到六曲风之一；未知值归 `其他`。"""
+    g = (genre or "").strip()
+    return g if g in GENRE_ORDER else "其他"
+
+
+def genre_short(genre: str) -> str:
+    """曲风的 ASCII 短名（画图用）。"""
+    return GENRE_SHORT.get(genre_band(genre), "OTHER")
+
+
 def bpm_band(bpm: float) -> str:
     """BPM 分段（n=8 报告里"BPM ≥ 200 被系统性高估"的那条分界保留成一档）。"""
     b = float(bpm)
@@ -137,6 +170,8 @@ GROUP_ORDER = {
     "bpm_band": ("<150", "150-179", "180-199", ">=200"),
     "level_band": ("13.0-13.2", "13.3-13.7", "13.8-14.2", "14.3-14.5"),
     "kind": ("instrumental", "vocal"),
+    "genre": GENRE_ORDER + ("其他",),
+    "genre_short": tuple(GENRE_SHORT[g] for g in GENRE_ORDER) + ("OTHER",),
 }
 
 
@@ -327,6 +362,23 @@ def sweep_two_thresholds(score_a, score_b, labels,
     return {"best": {"threshold_a": round(ta, 4), "threshold_b": round(tb, 4),
                      **sp.to_dict()},
             "n": int(a.size), "n_pos": int(y.sum())}
+
+
+def evaluate_fixed_one(scores, labels, t: float) -> dict:
+    """给定**单个**固定阈值（如现役 `stemplan.VOCAL_LED_SHARE = 0.14`）的混淆矩阵。
+
+    n=160 新增：判"要不要再换阈值"时必须拿**现役值**当对照，
+    只看扫出来的新最优点会系统性高估收益。
+    """
+    x = np.asarray(scores, dtype=float)
+    y = np.asarray(labels, dtype=bool)
+    ok = np.isfinite(x)
+    x, y = x[ok], y[ok]
+    pred = x >= float(t)
+    sp = Split(threshold=float(t),
+               tp=int(np.sum(pred & y)), fp=int(np.sum(pred & ~y)),
+               fn=int(np.sum(~pred & y)), tn=int(np.sum(~pred & ~y)))
+    return sp.to_dict()
 
 
 def evaluate_fixed_two(score_a, score_b, labels, ta: float, tb: float) -> dict:

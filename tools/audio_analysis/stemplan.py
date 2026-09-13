@@ -46,7 +46,7 @@ v0.2 把"主踩音轨"做成**一段一条轨**的单值。官方音频 × 官�
 | 5 | `interlude` | `drums` | **有人声采样时 `vocals` 优先** | 规则成立（C4），但 **v0.4 修正表述**：n=40 的 interlude vocals **recall 0.075 是全表最低**、**precision 0.673 是全表最高** → 正确说法是"间奏里的人声采样**稀少但一旦出现几乎必被采用**"，不是"间奏该踩人声" |
 | 6 | 休息段 / `quiet_chorus` | `drums` | 非鼓里倾向最高者 | **v0.4 可以定论了**（C5）：n=40 有 63 段，`quiet_chorus` 的 drums recall **0.666 为全表最高** → 落ちサビ**仍以鼓为骨架**，点缀轨可换、骨架不换 |
 | 7 | 第 N 次副歌 | 与 `repeat_of` 同 | 同 | 不变（`upgrade` 置位，靠配置升级不靠加密） |
-| 8 | `outro` | 与 `intro` 同 | 与 `intro` 同 | 不变 |
+| 8 | `outro` | 与 `intro` 同 | 与 `intro` 同 | ⚠️ **v0.5/n=160：已确认是缺陷，但暂不改行为**。n=40 时它是唯一输给常数基线的类型（7 段，0.571 vs 0.714），当时按"样本太小"标存疑；**n=160 的 32 段仍然输 9.4 个百分点（0.719 vs 0.813）** → 不再是样本问题。**换成什么还没有证据**（`outro` 只有 32 段、273 个事件），所以先把判定写清楚，行为不动 |
 
 通用规则：
 - **降级**：骨架轨 `n_onset_s < 2` 或 `grid_fit_s < 0.5` → 换成倾向最高的可用轨；
@@ -349,7 +349,11 @@ def plan_stems(segments, bar_features: dict[str, np.ndarray], grid,
             skeleton = intro_plan["skeleton"]
             accents = list(intro_plan["accents"])
             note = ("规则 8（MMFC 5.4-8）：与 intro 同骨架/同点缀前后呼应；"
-                    "⚠️ outro ≠ 减压（知识 031：官方谱末段最强，尾杀约 2/3）")
+                    "⚠️ outro ≠ 减压（知识 031：官方谱末段最强，尾杀约 2/3）；"
+                    "⚠️ **本规则已被 n=160 确认劣于「永远答 drums」**"
+                    "（32 段 0.719 vs 0.813），换法待证据")
+            suspect = ("规则 8 在 n=40（7 段）与 n=160（32 段）上都输常数基线，"
+                       "outro 的骨架轨建议人工复核")
         elif fn in ("intro", "outro"):
             accents = ranked_non_skel[:1]
             note = ("规则 1（MMFC 5.4-1 + 标定 C3）：前奏/尾奏按**onset 匹配倾向**（onset 密度 ×"

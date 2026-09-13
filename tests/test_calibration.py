@@ -604,3 +604,170 @@ def test_song_type_confusion_cross_tab():
     out = stemrefine.song_type_confusion(rows)
     assert out["share_vs_vad"] == {"tt": 1, "tf": 0, "ft": 1, "ff": 0}
     assert out["share_vs_pitched"] == {"tt": 1, "tf": 0, "ft": 0, "ff": 1}
+
+
+# ---------------------------------------------------------------------------
+# n=160 新增：官方 &genre 六曲风分层、CSV 体积对策、mix wav 回落
+# ---------------------------------------------------------------------------
+
+
+def test_genre_band_keeps_six_official_genres():
+    for g in strata_mod.GENRE_ORDER:
+        assert strata_mod.genre_band(g) == g
+    assert strata_mod.genre_band("  maimai  ") == "maimai"
+    assert strata_mod.genre_band("東方Project") == "東方Project"
+    # 未知曲风归 "其他"，不静默丢行
+    assert strata_mod.genre_band("オリジナル") == "其他"
+    assert strata_mod.genre_band("") == "其他"
+    assert strata_mod.genre_band(None) == "其他"
+
+
+def test_genre_short_is_ascii_for_plots():
+    for g in strata_mod.GENRE_ORDER + ("其他", "unknown"):
+        s = strata_mod.genre_short(g)
+        assert s.isascii() and s
+    assert strata_mod.genre_short("niconico＆ボーカロイド") == "niconico/VOCALOID"
+
+
+def test_boxplot_groups_orders_genres_by_official_order():
+    items = [{"genre_short": "POPS/ANIME", "v": 0.1},
+             {"genre_short": "maimai", "v": 0.2},
+             {"genre_short": "TOUHOU", "v": 0.3}]
+    out = strata_mod.boxplot_groups(items, "genre_short", "v")
+    # 官方顺序，而不是字典序（字典序会把 TOUHOU 排到 maimai 前面）
+    assert list(out) == ["maimai", "TOUHOU", "POPS/ANIME"]
+    # 全角曲风名同样按官方顺序
+    full = [{"genre": g, "v": 0.1} for g in
+            ("東方Project", "maimai", "POPS＆アニメ")]
+    assert list(strata_mod.boxplot_groups(full, "genre", "v")) == [
+        "maimai", "東方Project", "POPS＆アニメ"]
+
+
+def test_cross_table_counts_two_keys():
+    from tools.calibration import cli as cli_mod
+    rows = [{"genre": "maimai", "kind": "vocal"},
+            {"genre": "maimai", "kind": "instrumental"},
+            {"genre": "東方Project", "kind": "instrumental"},
+            {"genre": "東方Project", "kind": "instrumental"}]
+    out = cli_mod._cross_table(rows, "genre", "kind")
+    assert out["maimai"] == {"vocal": 1, "instrumental": 1}
+    assert out["東方Project"] == {"instrumental": 2}
+
+
+def _csv_fake_song(name: str) -> dict:
+    seg = {"kind": "audio", "seg_index": 0, "start_bar": 1, "end_bar": 8,
+           "start_idx": 0, "end_idx": 7, "function": "chorus", "label_ja": "サビ",
+           "n_events": 40, "d_bar_mean": 8.0, "I_mean": 0.5,
+           "best_stem": "drums", "best_recall": 0.6, "second_stem": "other",
+           "second_recall": 0.3, "best_stem_lift": "drums", "best_lift": 2.5,
+           "plan_agree": 1.0, "plan_agree_top2": 1.0, "plan_agree_lift": 1.0,
+           "per_stem": {k: {"recall": 0.5, "precision": 0.5, "lift": 2.0}
+                        for k in ("drums", "bass", "other", "vocals")}}
+    return {
+        "name": name, "level": 13.5, "bpm": 160.0, "genre": "maimai",
+        "n_bars_paired": 60, "notes_total": 600, "n_slots": 500,
+        "align_err_ms": 0.0, "phi_star_ms": 0.0, "offset_check_delta_ms": 0.0,
+        "corr": {"spearman_raw": 0.2, "spearman_smooth": 0.25,
+                 "spearman_smooth_weighted": 0.24, "pearson_smooth": 0.3,
+                 "section_spearman": 0.35},
+        "peak": {"peak_err_bars": 5},
+        "boundary": {"hit_rate_tol1": 0.5, "hit_rate_tol2": 0.7},
+        "floor": {"actual_notes_per_bar_mean": 9.0, "notes_per_bar_target": 9.2,
+                  "floor_fit_bar": 0.3, "mae": 3.0, "bias": 0.1},
+        "global_breakdown": {"none": 0.17},
+        "pool": {"precision": 0.55},
+        "endings": {"8": {"label": "尾杀", "tail_ratio": 1.1}},
+        "global_stem": {k: {"recall": 0.5, "precision": 0.5, "lift": 2.0}
+                        for k in ("drums", "bass", "other", "vocals")},
+        "audio_segments": [seg], "chart_segments": [],
+    }
+
+
+def test_write_csv_no_segments_keeps_song_rows_and_digest(tmp_path):
+    from tools.calibration import cli as cli_mod
+    songs = [_csv_fake_song("a"), _csv_fake_song("b")]
+    full = tmp_path / "full.csv"
+    slim = tmp_path / "slim.csv"
+    cli_mod.write_csv(full, songs, include_segments=True)
+    cli_mod.write_csv(slim, songs, include_segments=False)
+    import csv as _csv
+    rows_full = list(_csv.DictReader(full.open(encoding="utf-8")))
+    rows_slim = list(_csv.DictReader(slim.open(encoding="utf-8")))
+    assert len(rows_full) == 4 and len(rows_slim) == 2
+    assert all(r["scope"] == "song" for r in rows_slim)
+    assert rows_slim[0]["genre"] == "maimai"
+    assert rows_slim[0]["n_segments"] == "1"
+    assert rows_slim[0]["seg_best_drums"] == "1"
+    assert float(rows_slim[0]["seg_plan_agree"]) == pytest.approx(1.0)
+    # 逐段模式下汇总列留空（避免两种口径混在一列里）
+    assert rows_full[0]["n_segments"] == ""
+
+
+def test_segment_digest_counts_best_stems():
+    from tools.calibration import cli as cli_mod
+    s = _csv_fake_song("a")
+    s["audio_segments"] = s["audio_segments"] + [
+        {**s["audio_segments"][0], "best_stem": "vocals", "plan_agree": 0.0,
+         "plan_agree_top2": 1.0}]
+    d = cli_mod._segment_digest(s)
+    assert d["n_segments"] == 2 and d["seg_best_drums"] == 1
+    assert d["seg_best_vocals"] == 1
+    assert d["seg_plan_agree"] == pytest.approx(0.5)
+    assert d["seg_plan_agree_top2"] == pytest.approx(1.0)
+
+
+def test_ensure_mix_wav_reuses_existing_and_reports_temp(tmp_path):
+    from tools.calibration import loader as loader_mod
+    d = tmp_path / "song"
+    d.mkdir()
+    wav = d / "track.44k.wav"
+    wav.write_bytes(b"RIFF")
+    got, temp = loader_mod.ensure_mix_wav(d)
+    assert got == wav and temp is False
+    # 两个都没有时要明确报错，而不是静默返回不存在的路径
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        loader_mod.ensure_mix_wav(empty)
+
+
+def test_read_maidata_header_picks_up_genre(tmp_path):
+    from tools.calibration import loader as loader_mod
+    p = tmp_path / "maidata.txt"
+    p.write_text("&title=[ST] X\n&artist=Y\n&first=0\n&wholebpm=160\n"
+                 "&genre=東方Project\n&version=FiNALE\n&lv_5=13.5\n",
+                 encoding="utf-8")
+    h = loader_mod.read_maidata_header(p)
+    assert h["genre"] == "東方Project"
+    assert h["version"] == "FiNALE"
+    assert h["lv_5"] == pytest.approx(13.5)
+
+
+def test_evaluate_fixed_one_confusion_matrix():
+    scores = [0.05, 0.10, 0.20, 0.30]
+    labels = [False, False, True, True]
+    out = strata_mod.evaluate_fixed_one(scores, labels, 0.14)
+    assert out["tp"] == 2 and out["fp"] == 0 and out["fn"] == 0 and out["tn"] == 2
+    assert out["threshold"] == pytest.approx(0.14)
+    # 阈值过低 → 全判正
+    lo = strata_mod.evaluate_fixed_one(scores, labels, 0.0)
+    assert lo["tp"] == 2 and lo["fp"] == 2 and lo["youden"] == pytest.approx(0.0)
+    # nan 分数被丢掉，不参与混淆矩阵
+    nan_in = strata_mod.evaluate_fixed_one([0.2, float("nan")], [True, True], 0.14)
+    assert nan_in["tp"] == 1 and nan_in["fn"] == 0
+
+
+def test_pool_hit_uses_unshifted_slots():
+    """n=160 修正：候选池（量化网格）必须与**未做 φ 补偿**的官方时间槽比。
+
+    网格锚在用户给的 `&first` 上，与官方 note 同一个时钟；再叠一次 φ 平移
+    会把官方 note 推离网格（L4TS2018 φ*=−37.5 ms 时 recall 被压到 0.003）。
+    """
+    grid_slots = np.arange(0.0, 10.0, 0.25)        # 量化后的候选网格
+    official = np.arange(0.0, 10.0, 0.5)           # 官方 note 与网格同钟
+    shifted = official - 0.0375                    # 叠上 φ* 之后
+    tol = 0.030
+    ok = stemhit.hit_stat(official, grid_slots, tol=tol, span_sec=10.0)
+    bad = stemhit.hit_stat(shifted, grid_slots, tol=tol, span_sec=10.0)
+    assert ok.recall == pytest.approx(1.0)
+    assert bad.recall == pytest.approx(0.0)

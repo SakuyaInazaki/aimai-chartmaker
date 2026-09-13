@@ -34,11 +34,18 @@ INOTE_KEY = "&inote_5="          # Master 难度
 
 
 def read_maidata_header(path: Path) -> dict:
-    """读 maidata 头部元数据（只取标定需要的字段）。"""
+    """读 maidata 头部元数据（只取标定需要的字段）。
+
+    ``genre`` / ``artist`` / ``version`` 是 n=160 新增：官方曲包的 ``&genre``
+    就是**官方六曲风分类**（maimai / niconico＆ボーカロイド / ゲーム＆バラエティ /
+    東方Project / オンゲキ＆CHUNITHM / POPS＆アニメ），比任何音频侧代理都硬，
+    因此 n=160 的曲风分层直接用它，不再靠人工猜。
+    """
     txt = Path(path).read_text(encoding="utf-8", errors="replace")
     out: dict = {}
     for key, cast in (("title", str), ("first", float), ("wholebpm", float),
-                      ("lv_5", float)):
+                      ("lv_5", float), ("genre", str), ("artist", str),
+                      ("version", str)):
         m = re.search(rf"^&{key}=(.*)$", txt, flags=re.M)
         if m:
             try:
@@ -46,6 +53,35 @@ def read_maidata_header(path: Path) -> dict:
             except ValueError:
                 out[key] = m.group(1).strip()
     return out
+
+
+def ensure_mix_wav(song_dir: Path) -> tuple[Path, bool]:
+    """保证 `track.44k.wav` 存在，返回 ``(路径, 是否是本次临时解码出来的)``。
+
+    n=160 这一轮磁盘只剩十几 GB，管线跑完每首都会删掉 22 MB 的 `track.44k.wav`，
+    所以标定装载时按**同一条 ffmpeg 命令**重新解码（`decode.decode_to_wav`），
+    时间基准与管线完全一致；调用方用完应当把临时文件删掉。
+
+    ⚠️ 临时解码**不写回曲目录**，而是写到进程私有的临时目录 —— 否则与同时在跑的
+    分离脚本（它也会临时解码同名文件再删掉）抢同一个路径。
+    """
+    song_dir = Path(song_dir)
+    wav = song_dir / "track.44k.wav"
+    if wav.exists():
+        return wav, False
+    import sys
+    import tempfile
+
+    repo = Path(__file__).resolve().parents[2]
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from tools.audio_analysis import decode as decode_mod
+
+    src = song_dir / "track.mp3"
+    if not src.exists():
+        raise FileNotFoundError(f"{song_dir} 既没有 track.44k.wav 也没有 track.mp3")
+    tmp = Path(tempfile.mkdtemp(prefix="calib-mix-"))
+    return decode_mod.decode_to_wav(src, tmp), True
 
 
 def extract_inote(path: Path, key: str = INOTE_KEY) -> str:
@@ -65,6 +101,7 @@ class SongBundle:
     level: float
     bpm: float
     first: float
+    genre: str = ""                   # 官方 `&genre`（n=160 曲风分层用）
     grid: object = None
     analysis: dict = field(default_factory=dict)
     parse: object = None              # chart_analysis.simai_parser.ParseResult
@@ -204,7 +241,8 @@ def load_song(song_dir: Path, recompute_intensity: bool = True,
 
     bundle = SongBundle(
         name=name, level=float(meta.get("lv_5", 0.0) or 0.0), bpm=float(g["bpm"]),
-        first=float(g["first"]), grid=grid, analysis=analysis, parse=res, density=dens,
+        first=float(g["first"]), genre=str(meta.get("genre", "") or ""),
+        grid=grid, analysis=analysis, parse=res, density=dens,
         bar_intensity=np.asarray(analysis["intensity"]["bar_intensity"], dtype=float),
         bar_intensity_raw=np.asarray(analysis["intensity"]["bar_intensity_raw"],
                                      dtype=float),
@@ -214,8 +252,14 @@ def load_song(song_dir: Path, recompute_intensity: bool = True,
     # ---- 音频侧：重跑 onset（纯 DSP，与管线同参）----
     import librosa
 
-    wav = song_dir / "track.44k.wav"
+    wav, wav_was_temp = ensure_mix_wav(song_dir)
     y_mix, sr = librosa.load(str(wav), sr=onsets_mod.ANALYSIS_SR, mono=True)
+    if wav_was_temp:
+        # 磁盘紧张时管线跑完会删掉 track.44k.wav（22 MB/首 × 160 首）。
+        # 这里按同一条 ffmpeg 命令重新解码（时间基准完全一致），用完即删。
+        import shutil as _shutil
+
+        _shutil.rmtree(wav.parent, ignore_errors=True)
     stem_audio: dict[str, np.ndarray] = {}
     for s in STEM_ORDER:
         p = song_dir / "stems" / f"{s}.wav"

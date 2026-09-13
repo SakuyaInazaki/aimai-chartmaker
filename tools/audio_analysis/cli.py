@@ -81,12 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--section-floor", type=float,
                    default=intensity_mod.SECTION_DENSITY_FLOOR,
                    help=f"段落尺度密度地板（默认 {intensity_mod.SECTION_DENSITY_FLOOR}，"
-                        f"来自 388 谱段间落差）。n=8 配对标定给出的池化最优是 "
-                        f"{intensity_mod.CALIBRATED_SECTION_FLOOR}，样本太小未采纳为默认，"
-                        f"可用本参数自行试")
+                        f"来自 388 谱段间落差）。n=160 配对标定给出的池化最优是 "
+                        f"{intensity_mod.CALIBRATED_SECTION_FLOOR}（默认值的 SSE 代价 "
+                        f"+9.5%%），大样本优先未采纳为默认，可用本参数自行试")
     p.add_argument("--bar-floor", type=float, default=intensity_mod.BAR_DENSITY_FLOOR,
                    help=f"小节尺度密度地板（默认 {intensity_mod.BAR_DENSITY_FLOOR}；"
-                        f"n=8 标定实测最优 0.020，差距仅 2.4%% SSE → 保留默认）")
+                        f"n=160 标定实测最优 0.340，默认值只差 0.5%% SSE → 保留默认）")
     p.add_argument("--intro-outro-cap", type=float,
                    default=intensity_mod.INTRO_OUTRO_CAP_RATIO,
                    help=f"intro/outro 建议密度的**结构封顶**比例（默认 "
