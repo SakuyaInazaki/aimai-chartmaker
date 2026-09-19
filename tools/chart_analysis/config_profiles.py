@@ -12,7 +12,7 @@
   键位位移、slide 占比、等效速度（分音 × BPM）、无理代理命中率，以及
   **去掉配置项的硬度分**（破循环论证）。
 - **外在放置**（要音频；160 首标定曲）：所在小节的曲内强度分位、段落分布、
-  曲内相对位置、定数分层，以及三口径下的采音模式。
+  曲内相对位置、定数分层，以及三口径下的采音方式（采全音 / 半采音 / 空音）。
 
 ⚠️ **检测器可替换**
 ------------------
@@ -429,7 +429,7 @@ def placement_by_config(rows: Iterable[dict], config_key: str = "configs",
     """每配置的**外在放置**画像（需要音频配对的逐小节行）。
 
     强度分位（均值/中位/四分位）、高/低强度档的富集 lift、曲内相对位置、
-    coverage 与各采音模式占比。
+    coverage 与各**采音方式**占比（三个词见 `tools/calibration/sampling.py`）。
     """
     rows = list(rows)
     base: dict[str, int] = {}
@@ -538,7 +538,7 @@ def recommend_matrix(rows: Iterable[dict], row_key: str = "pool_tier",
 
     每格给出：n、该格里 **lift 最高**的前 ``top`` 个配置（``top_configs``，
     要求该格出现次数 ≥ ``min_count``）、**出现率最高**的前 ``top`` 个配置
-    （``top_common``）、最常见的采音模式前 2、以及该格的平均 coverage。
+    （``top_common``）、最常见的**采音方式**前 2、以及该格的平均 coverage。
 
     两份榜都给：lift 榜回答"这一格比别处更爱用什么"，出现率榜回答
     "这一格实际最常写的是什么"——只看 lift 会选出小样本配置，

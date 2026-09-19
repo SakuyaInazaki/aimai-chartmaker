@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
-"""采音模式度量：官方谱在每个小节**怎么采**目标音轨发出的音。
+"""采音方式度量：官方谱在每个小节**怎么采**目标音轨发出的音。
 
 问题
 ----
 `stemhit.py` 回答的是"官方踩的是哪条轨"（recall / precision / lift）。
-本模块回答的是**同一条轨上、采音的形态**：
+本模块回答的是**同一条轨上、采音的方式**。
 
-- **全采**：目标轨这一小节的音基本都踩了；
-- **近全采**：踩掉三分之二到八成（官方谱最常见的形态）；
-- **半采**：只踩一半，**而且踩的是更响/更重的那一半**；
-- **随机半采**：也只踩一半，但踩与不踩跟音的轻重无关；
-- **稀采（空音）**：音轨在响，谱面却大面积留白；
-- **加花**：谱面写了任何一条轨都没有的音（自由发挥）；
-- **静默**：这一小节谱面几乎不写音；
-- **混合**：都不像。
+**说法只用用户的三个词**（用户原话：「是**采全音**、**空音**还是**半采音**等等」）：
+
+- **采全音**：把这段音轨的音基本都踩了；
+- **半采音**：有选择地只踩一部分（隔一个、只踩重音之类）；
+- **空音**：该有音的地方留白不踩。
+
+判不出来的小节（这一小节音轨本来就没发出几个音）落 :data:`UNKNOWN`（``"—"``），
+它**不是一种采音方式**，只表示"没有依据、不下结论"。
+
+**2026-09-20 术语修正（用户五条批评之一）**——原话：
+「什么叫采七成算不算全采？根本就没有这些词吧，这些词哪来的臆造出来的吗？
+怎么能量化这些事情呢？」
+
+本模块此前对外输出过八类：``全采 / 近全采 / 半采 / 随机半采 / 稀采·空音 / 加花 /
+静默 / 混合``。除了用户给的三个词，其余**全是 agent 臆造的类名**，已从对外输出、
+报告结论与知识草案里整体移除。现在对外只有上面三个词。
+
+⚠️ :data:`THRESHOLDS` 里的 coverage 切点**只是工具内部把连续量落到三个词上的诊断
+口径，不是术语定义，也不拿去问用户**（"踩七成算不算全采"这种问题不该抛给谱师）。
+``coverage`` / ``extra_ratio`` / ``accent`` 等数字保留为**诊断字段**，CLI 默认不打印。
 
 **2026-09-19 修订（用户原话：「采音肯定是根据音乐来踩的啊，不能光根据 bpm 来。」）**
 
-旧版判"半采"用的是三条判据：①被踩中的 pool 下标构成等差为 2 的序列（"隔一个"）；
+旧版判"只踩一部分"用的是三条判据：①被踩中的 pool 下标构成等差为 2 的序列（"隔一个"）；
 ②官方槽全落在 0.5 拍整数倍上（"只踩强拍"）；③谱面最细分音 = 音频量化分音的一半
 （"分音减半"）。**②③ 是网格/分音/BPM 判据，与"音乐里哪个音更重"无关，已删除**；
-①（下标等差 2）也只是网格现象，同样删除。
+①（下标等差 2）也只是网格现象，同样删除。整条采音判定链上不再有任何分音 / BPM / 网格量。
 
-新版的**唯一**半采判据是"挑重音"：被踩中的音，平均 onset 强度要 ≥ 没被踩中的音
-（或者命中率随 onset 强度分位单调上升）。小节内的比较对象**只有目标音轨这一小节
-实际发出的音**，不再出现任何拍网格量。
-
-⚠️ **类别名与阈值仍是 agent 的操作化**，不是用户讲授的术语定义；参数集中在
-:data:`THRESHOLDS`，敏感性见 `docs/research/config-difficulty-intensity.md` §1.4。
+"挑重音"（被踩中的音平均 onset 强度更高）现在只是 ``半采音`` 小节的一个**诊断标记**
+（``accent`` / ``accent_reason``），不再把"挑重音的半采"和"不挑重音的半采"分成两类。
 
 口径
 ----
@@ -59,23 +67,27 @@ SKELETON_STEMS = ("drums", "bass", "other", "vocals", "piano")
 #: 旋律类轨（`skeleton_mode="melodic"` 口径：三者取 lift 最高）
 MELODIC_STEMS = ("other", "piano", "vocals")
 
-#: 采音模式的操作化阈值（**agent 设定**，可整体替换；敏感性见报告）
+#: ⚠️ **工具内部的诊断口径，不是术语定义**（用户 2026-09-20）。
+#: 把连续的 coverage 落到"采全音 / 半采音 / 空音"三个词上总得有个切点，这些数字就是
+#: 那个切点——它们**不向用户索取、不作为待裁定项、不写进知识库**。
 THRESHOLDS: dict = {
-    "full_coverage": 0.80,      # 全采：coverage ≥
-    "full_extra_max": 0.30,     # 全采：extra_ratio <
-    "near_full_lo": 0.65,       # 近全采：coverage ∈ (near_full_lo, full_coverage)
-    "half_lo": 0.35,            # 半采：coverage ∈ [half_lo, half_hi]
-    "half_hi": 0.65,
-    "sparse_coverage": 0.35,    # 稀采/空音：coverage <
-    "sparse_min_pool": 4,       # 稀采/空音：且 pool ≥（音乐真的在响）
-    "flourish_extra": 0.50,     # 加花：extra_ratio ≥
-    "silent_slots": 1,          # 静默：官方时间槽 ≤
-    "min_pool": 2,              # pool 少于这么多就不给 coverage 下结论
-    "merge_sec": 0.060,         # pool 去重granularity（= 2τ）
+    "full_lo": 0.65,            # 采全音：coverage > 此值（"基本都踩了"）
+    "empty_hi": 0.35,           # 空音：coverage < 此值（"该有音的地方留白"）
+    #                             两者之间 = 半采音（"有选择地只踩一部分"）
+    "empty_min_pool": 4,        # 空音还要求 pool ≥（音乐真的在响，否则是没音可踩）
+    "min_pool": 2,              # pool 少于这么多就不下结论（落 UNKNOWN，"没音可踩"）
+    "merge_sec": 0.060,         # pool 去重 granularity（= 2τ）
+    # ↓ 只影响 `accent` 这个**诊断标记**，不影响三个词的归类
     "accent_margin": 0.0,       # 挑重音：均强差 > 此值才算"踩的是重音"（打平不算）
     "accent_bins": 3,           # 强度分位桶数（"命中率随强度单调上升"判据）
     "accent_min_side": 2,       # 两侧各至少这么多个有强度的事件才判挑重音
 }
+
+#: 判不出来的小节（音轨这一小节本来就没发出几个音）。**不是一种采音方式**。
+UNKNOWN = "—"
+
+#: 对外只有用户给的这三个词（用户原话：「是采全音、空音还是半采音等等」）
+MODE_ORDER = ("采全音", "半采音", "空音")
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +170,7 @@ class BarSampling:
     accent_delta: float = float("nan")
     rest_beats: float = 0.0
     density_ratio: float = float("nan")   # 官方槽数 / pool 大小
-    mode: str = "静默"
+    mode: str = UNKNOWN
     per_stem_pool: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -177,42 +189,30 @@ class BarSampling:
 
 def classify(coverage: float, extra_ratio: float, n_slots: int,
              n_pool: int, accent: bool, th: dict | None = None) -> str:
-    """把一小节的度量落成采音模式（**操作化定义**，见模块 docstring）。
+    """把一小节的度量落成**用户的三个词**之一（或 :data:`UNKNOWN`）。
 
-    判定顺序（先判的优先）::
+    - ``采全音``：``coverage > full_lo``——把这段音轨的音基本都踩了；
+    - ``空音``：``coverage < empty_hi`` 且 ``n_pool ≥ empty_min_pool``——
+      音轨在响，谱面却留白不踩；
+    - ``半采音``：两者之间——有选择地只踩一部分；
+    - ``—``（:data:`UNKNOWN`）：音轨这一小节发出的音太少（``n_pool < min_pool``），
+      **没有依据、不下结论**。谱面这一小节几乎不写音、而音轨在响的情形**不是**
+      判不出——它 coverage ≈ 0，就是 ``空音``。
 
-        静默 → 加花 → 证据不足(混合) → 全采 → 近全采 → 半采/随机半采
-             → 稀采/空音 → 混合
-
-    - ``静默``：官方时间槽 ≤ ``silent_slots``；
-    - ``加花``：``extra_ratio ≥ flourish_extra``；
-    - ``全采``：``coverage ≥ full_coverage`` 且 ``extra_ratio < full_extra_max``；
-    - ``近全采``：``near_full_lo < coverage < full_coverage``；
-    - ``半采``：``half_lo ≤ coverage ≤ half_hi`` **且挑重音**；
-    - ``随机半采``：同区间但**不挑重音**（= 任务里说的"随机半采/混合"）；
-    - ``稀采/空音``：``coverage < sparse_coverage`` 且 ``n_pool ≥ sparse_min_pool``；
-    - 其余 → ``混合``（含"coverage 高但加花也多"的那一小撮）。
+    ⚠️ 切点在 :data:`THRESHOLDS` 里，是**工具内部的诊断口径**，不是术语定义
+    （用户 2026-09-20：「根本就没有这些词吧……怎么能量化这些事情呢？」）。
+    ``extra_ratio``（谱面写了哪条轨都没有的音）与 ``accent``（踩的是不是重音）
+    只作诊断字段，**不再各自撑起一个类名**（原来的"加花""静默""随机半采"等
+    agent 自造类名已整体删除）。
     """
     th = THRESHOLDS if th is None else th
-    if n_slots <= th["silent_slots"]:
-        return "静默"
-    if np.isfinite(extra_ratio) and extra_ratio >= th["flourish_extra"]:
-        return "加花"
     if n_pool < th["min_pool"] or not np.isfinite(coverage):
-        return "混合"
-    if coverage >= th["full_coverage"]:
-        return "全采" if extra_ratio < th["full_extra_max"] else "混合"
-    if coverage > th["near_full_lo"]:
-        return "近全采"
-    if th["half_lo"] <= coverage <= th["half_hi"]:
-        return "半采" if accent else "随机半采"
-    if coverage < th["sparse_coverage"] and n_pool >= th["sparse_min_pool"]:
-        return "稀采/空音"
-    return "混合"
-
-
-#: 报告里固定的模式列顺序
-MODE_ORDER = ("全采", "近全采", "半采", "随机半采", "稀采/空音", "加花", "静默", "混合")
+        return UNKNOWN
+    if coverage > th["full_lo"]:
+        return "采全音"
+    if coverage < th["empty_hi"]:
+        return "空音" if n_pool >= th["empty_min_pool"] else UNKNOWN
+    return "半采音"
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,8 @@ def song_sampling(bars: Sequence[tuple[int, int, float, float, float]],
         ``{轨名: np.ndarray(秒)}``。
     stem_strengths
         ``{轨名: np.ndarray}``，与 ``stem_onsets`` 等长的 onset 强度；缺了就按
-        NaN 处理（该小节判不出"挑重音"，半采会落到 ``随机半采``）。
+        NaN 处理（该小节判不出"挑重音"，`accent` 这个诊断标记为 False，
+        **不影响**落哪个词）。
     skeleton_mode
         - ``bar``：逐小节在五条轨里按 lift 取（证据不足回落段落/drums）；
         - ``melodic``：逐小节只在 ``MELODIC_STEMS`` 里按 lift 取；
@@ -402,8 +403,8 @@ def shuffled_control(bars: Sequence[tuple[int, int, float, float, float]],
     平移量取 ``[0.1·曲长, 0.9·曲长]`` 上的均匀分布（各轨独立），落在曲长上循环回绕
     （按比例取而不是固定秒数，短曲/长曲都不会退化成常数平移）。
     这样 onset 的**密度、节奏纹理与强度分布完全保留**（强度跟着 onset 一起搬），
-    只有"和谱面的对齐关系"被打断——如果采音模式的分布（尤其是"挑重音"的半采）
-    在对照上也一样，说明模式只是密度的伪影。
+    只有"和谱面的对齐关系"被打断——如果三个词的分布（尤其是半采音里"挑重音"的比例）
+    在对照上也一样，说明它只是密度的伪影。
     """
     rng = np.random.default_rng(seed)
     t_end = max(b[3] for b in bars) if bars else 0.0
@@ -623,7 +624,7 @@ def _cli(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(
         prog="python -m tools.calibration.sampling",
-        description="采音模式度量（全采/近全采/半采/随机半采/稀采/加花），逐小节")
+        description="采音方式度量（采全音 / 半采音 / 空音），逐小节")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s1 = sub.add_parser("song", help="单曲逐小节表")
@@ -634,8 +635,11 @@ def _cli(argv: list[str] | None = None) -> int:
     s1.add_argument("--pitch-conf", type=float, default=None,
                     help="并入置信度 ≥ 此值的 basic-pitch note（默认关闭）")
     s1.add_argument("--json", default=None, help="逐小节 JSON 输出路径")
+    s1.add_argument("--diagnostics", action="store_true",
+                    help="额外打印 coverage / extra / pool / 挑重音等**诊断数字**"
+                         "（默认不打印：它们是工具内部口径，不是术语）")
 
-    s2 = sub.add_parser("corpus", help="全库汇总（模式分布 + 对照）")
+    s2 = sub.add_parser("corpus", help="全库汇总（三词分布 + 对照）")
     s2.add_argument("--calib-dir", default="out/calib")
     s2.add_argument("--onset-cache", default=None)
     s2.add_argument("--skeleton", default="bar")
@@ -654,13 +658,18 @@ def _cli(argv: list[str] | None = None) -> int:
                              stem_strengths=d["strengths"],
                              melodic_default=d["melodic_default"])
         print(f"# {d['name']}  φ*={d['phi_ms']:+.1f}ms  小节 {len(rows)}")
-        print("bar  seg              mode       cov   extra  pool slots 目标轨 挑重音")
+        if a.diagnostics:
+            print("bar  seg              采音方式  目标轨   [诊断] cov  extra pool slots 挑重音")
+        else:
+            print("bar  seg              采音方式  目标轨")
         for r in rows:
             seg = d["seg_of_bar"].get(r.bar, {}).get("label_ja", "")
-            cov = "  n/a" if not np.isfinite(r.coverage) else f"{r.coverage:5.2f}"
-            print(f"{r.bar:>3}  {seg:<14} {r.mode:<9} {cov} "
-                  f"{r.extra_ratio:5.2f} {r.n_pool:>4} {r.n_slots:>5} {r.skeleton:<7}"
-                  f" {r.accent_reason}")
+            line = f"{r.bar:>3}  {seg:<14} {r.mode:<8} {r.skeleton:<7}"
+            if a.diagnostics:
+                cov = "  n/a" if not np.isfinite(r.coverage) else f"{r.coverage:5.2f}"
+                line += (f"  {cov} {r.extra_ratio:5.2f} {r.n_pool:>4} "
+                         f"{r.n_slots:>5} {r.accent_reason}")
+            print(line)
         if a.json:
             Path(a.json).write_text(json.dumps([r.to_dict() for r in rows],
                                                ensure_ascii=False, indent=1),

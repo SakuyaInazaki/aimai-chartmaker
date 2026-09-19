@@ -33,13 +33,13 @@
 
 **两者不相加、不平均**（用户已撤回 `(D+H)/2` 那类合成排序）。
 
-⚠️ 待用户对齐的参数
--------------------
-下列口径目前是 agent 操作化，用户正在对齐手序意识，对齐后直接改 :data:`PARAMS`：
-``vertical_split_ms``（纵连"拆"的分界）、``chuzhang_min_cross``（出张容忍）、
-``side_double_guard_slots``（侧边双押"引导"窗口）、``start_hand``（段首起手）、
-``one_hand_two_objects``（一手能否吃两个对象）、``slide_owner_rule``（划轨手怎么定）。
-见本文件末尾 :data:`PENDING_USER_PARAMS`。
+⚠️ 操作化参数的定位（2026-09-20 术语修正）
+-----------------------------------------
+:data:`PARAMS` 里的窗口长度、最短串长、容差**全是 agent 为了能跑代码而定的内部口径**，
+**不是术语、不是分级、也不拿去问用户**——用户 2026-09-20 明确：制谱判断是谱师的定性
+判断（「正常写谱谁去特意算这些事情」「根本就没有这些词吧」）。这些数字只在工具内部
+当诊断用；要问用户的只有**必须用谱例问的定性问题**。
+:data:`PENDING_USER_PARAMS` 因此已清空（见该处说明）。
 
 CLI::
 
@@ -90,12 +90,13 @@ PARAMS: dict = {
     #: 019 纵连"一手连打 vs 两手拆"的分界：hands.t_required(0) = 83.3 ms（知识 015 反推）。
     #: **只对长度 >`vertical_single_hand_max` 的纵连生效**（知识 019 用户补充：长度优先）
     "vertical_split_ms": 83.3,
-    #: 019 用户补充（2026-09-19）：「3 个 tap 或以内」的纵连稍快也可单手 → **已按用户口径定**
+    #: 019 用户补充：「3 个以内」的纵连稍快也可单手（用户 2026-09-20：**只要需要击打
+    #: 按键的 note 都算** —— tap / hold 头 / 星星头，见 `hands._HIT_KINDS`）
     "vertical_single_hand_max": 3,
-    #: 043 出张：被钉住那只手的半圈里，另一只手要跨几个才算出张（ep2 §6 草案给 2）
+    #: 043 出张的**段级**成段口径：一段 slide/hold 钉住一只手的窗口里，出现几个出张落点
+    #: 才把这一段记成"出张"配置。出张本身是布尔（`hands.is_chuzhang`，知识 064），
+    #: **没有分档**；这个 2 只是"几个落点才值得单独记一段"的**内部计数口径**（agent 操作化）。
     "chuzhang_min_cross": 2,
-    #: 030 侧边双押"引导"代理窗口（键位版同名参数，知识 030 未给判据）
-    "side_double_guard_slots": 4,
     #: hands.assign 的段首起手；None = 交给 hands 自己选（知识 060 的逐段枚举未实现）
     "start_hand": None,
     #: 是否允许"一只手一次吃两个对象"（知识 042/055b/060②）——默认关，ep3 §5.4-3 要求实测前不放宽
@@ -140,32 +141,26 @@ PARAMS: dict = {
                          "muri": 0.10, "config": 0.20},
 }
 
-#: 原 v1（提交 4942759）列出的 6 个"待用户对齐"口径，**2026-09-19 用户讲授后逐项结案**：
+#: **已清空（2026-09-20）**。
 #:
-#: ======================== ========================================================
-#: ``vertical_split_ms``    **已按用户口径定**（知识 019 补充）：长度优先于速度，
-#:                          ≤3 个 tap 单手合法；速度线只管长度 >3 的那一档
-#: ``chuzhang_min_cross``   **口径已定、阈值仍待**（知识 064）：出张 = R→6/7 / L→2/3
-#:                          已确定；"几个落点才算一段出张配置"用户未给
-#: ``side_double_guard_slots`` **已作废**（知识 030 补充）：改成 `hands.side_double_events`
-#:                          的"突然 ∧ ¬引导"，阈值由 388 官谱标定
-#: ``start_hand``           **已按用户口径定**（知识 067）：段首起手 = 离上一段结束近的手，
-#:                          由 `hands.py` 的位移项 + `w_seg_start_far` 表达，不再强制/枚举
-#: ``one_hand_two_objects`` **已按用户口径定**（知识 066）：保持关闭，理由升级为规划期口径
-#: ``slide_owner_rule``     **已按用户口径定**（知识 065）：头与条可分属两手、无偏好，
-#:                          直接用 `hands.assign` 的结果
-#: ======================== ========================================================
-PENDING_USER_PARAMS: tuple[str, ...] = (
-    "chuzhang_min_cross",      # 仅剩这一个：口径已定（064），"几次算一段"的阈值仍待
-)
+#: 原 v1（提交 4942759）列过 6 个"待用户对齐"口径，2026-09-19 的用户讲授结掉 5 个，
+#: 留下 ``chuzhang_min_cross``（"几个落点才算一段出张"）。用户 2026-09-20 指出这类
+#: 量化问题根本不该抛给谱师（「出张本来是一件很小的事啊，怎么就分档了？」
+#: 「怎么能量化这些事情呢？」），因此**最后一项也撤出**：它是 agent 的内部计数口径，
+#: 不是待裁定项。
+#:
+#: 规矩：**agent 自造的阈值/分档/合成分不得作为问题抛给用户**；要问用户的只能是
+#: 必须用谱例问的**定性**问题（例如某一段到底算不算出张/反手）。
+PENDING_USER_PARAMS: tuple[str, ...] = ()
 
 #: 已按用户口径结案的口径（保留名字，供报告对照）
 RESOLVED_USER_PARAMS: dict[str, str] = {
-    "vertical_split_ms": "019 补充：长度优先，≤3 tap 可单手",
-    "side_double_guard_slots": "030 补充：改'突然 ∧ ¬引导'，参数作废",
+    "vertical_split_ms": "019 补充：长度优先，≤3 个击打音可单手",
+    "side_double_guard_slots": "030：改用 `hands.side_double_events` 的有无引导（定性）",
     "start_hand": "067：段首起手 = 离上一段结束近的手",
     "one_hand_two_objects": "066：保持关闭（写谱不以手法为导向）",
     "slide_owner_rule": "065：头与条可分属两手、无偏好",
+    "chuzhang_min_cross": "064：出张是布尔判定 + 计数，不分档；成段口径属内部操作化",
 }
 
 #: 体力/精度硬度的配置权重（沿用键位版 `configs.CONFIG_WEIGHT`，星星族为本轮新增，
@@ -1179,12 +1174,14 @@ def detect_scatter(ctx: HandCtx, runs: Sequence[tuple[int, int]],
 
 
 def detect_double_run(ctx: HandCtx) -> list[ConfigHitH]:
-    """**030 连续双押**（手级）+ `侧边双押` 红线。
+    """**030 连续双押**（手级）+ `侧边双押` 复核清单。
 
     规格（§5）：``pairs`` 连续 ≥3；**双押纵** = 两手键都常量；**绕圈** = 两手同向逐格推进；
-    **侧边双押红线** = ``{L,R} ∈ {{2,3},{6,7}}`` 且前后无共享键引导。
+    **侧边双押** = ``{L,R} ∈ {{2,3},{6,7}}``，只标**有没有引导**（判据来自
+    `hands.side_double_events`，四型形状判定，**"突然"不用数字定义**）。
 
-    ⚠️ "引导"仍是未确认代理（知识 030 未给判据，见 `side_double_guard_slots`）。
+    ⚠️ "引导"的四型是 agent 按用户给的三个例子归纳的，**覆盖不全**（388 官谱上 307 次
+    判不出引导）。所以无引导的那些是**供人复核的清单**，不记无理、不下判决。
     """
     out: list[ConfigHitH] = []
     slots = ctx.slots
@@ -1231,27 +1228,26 @@ def detect_double_run(ctx: HandCtx) -> list[ConfigHitH]:
                  "keys_l": [k for k in lk if k][:16],
                  "keys_r": [k for k in rk if k][:16]}))
         i = j + 1
-    # --- 侧边双押（知识 030 铁律 + 用户 2026-09-19 的"突然/引导"定义）---
-    # v0.2：判据整体搬到 `hands.side_double_events()`——铁律读作「**禁止突然的**
-    # 侧边双押」，红线 = 突然 ∧ ¬引导；`side_double_guard_slots` 的"周边有同键音"
-    # 代理作废（它被 D 型引导吸收，见 hands.side_double_events 的说明）。
+    # --- 侧边双押（知识 030 铁律）---
+    # 判据整体来自 `hands.side_double_events()`：铁律读作「**禁止突然（＝没有引导）的**
+    # 侧边双押」，只标**有没有引导**（A/B/C/D 四型形状判定），**不用数字定义"突然"**
+    # （用户 2026-09-20）。无引导的那些是**复核清单**，不是判决、不记无理。
     for ev in ctx.ha.side_doubles:
         idx = _slot_at(slots, ev["time"])
         if idx is None:
             continue
-        tag = ("红线：突然且无引导" if ev["redline"]
-               else f"有引导（{ev['guide_type']} 型）" if ev["guided"]
-               else "无引导但不突然")
+        tag = (f"有引导（{ev['guide_type']} 型）" if ev["guided"]
+               else "无引导 —— 请人复核（知识 030 铁律）")
         out.append(_span(
             ctx, idx, idx, "侧边双押", "030",
-            f"{ev['keys'][0]}/{ev['keys'][1]}（{tag}；距临近位置 {ev['disp_cfg']} 格、"
-            f"距上一配置 {'—' if ev['gap'] is None else format(ev['gap']*1000, '.0f')+' ms'}）",
+            f"{ev['keys'][0]}/{ev['keys'][1]}（{tag}）",
             f"L:{ev['L']}  R:{ev['R']}（同半圈相邻，必有一手出张）",
             {"keys": ev["keys"], "guided": ev["guided"],
-             "guide_type": ev["guide_type"], "sudden": ev["sudden"],
-             "sudden_kind": ev["sudden_kind"], "redline": ev["redline"],
-             "disp_cfg": ev["disp_cfg"], "gap_ms": (None if ev["gap"] is None
-                                                    else round(ev["gap"] * 1000, 1)),
+             "guide_type": ev["guide_type"], "redline": ev["redline"],
+             # ↓ 纯诊断字段（定位用），不参与判定
+             "near_dist": ev["near_dist"],
+             "gap_ms": (None if ev["gap"] is None
+                        else round(ev["gap"] * 1000, 1)),
              "run_len": ev["run_len"]}))
     return out
 
@@ -2250,12 +2246,15 @@ def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
     知识 043 的教程侧粗口径（"左手打右边"）与 ep2 §6 的 ``page_depth ≥ 1`` 代理
     **一并作废**——后者会把右手打 5/8、左手打 1/4 也算成跨界，与用户口径冲突。
 
+    **出张不分档**（用户 2026-09-20：「出张本来是一件很小的事啊，怎么就分档了？」）——
+    它就是 ``is_chuzhang(hand, key)`` 这一个**布尔判定**加一个**计数**；跨到 6 还是 7、
+    跨多久、跨多频繁都不构成档位，本模块不得自造分级。
+
     机制部分保留：以每条 slide/hold 的 **[头, 名义尾]** 为窗口（这段时间那只手被
     钉住），统计窗口内**落进出张区**的任务数；≥ ``chuzhang_min_cross`` 且其中至少
-    有一个是**击打**（不是纯轨道）时判出张。
-
-    ⚠️ ``chuzhang_min_cross`` 仍是 **待用户对齐**的容忍度（默认 2，ep2 §6 草案口径）：
-    用户只说"轻易不要写"，没说几次才算一段"出张配置"。
+    有一个是**击打**（不是纯轨道）时把这一段记成"出张"配置。
+    ``chuzhang_min_cross`` 只是"几个落点才值得单独记一段"的**内部计数口径**
+    （agent 操作化），不是难度分级，也不向用户索取。
     """
     out: list[ConfigHitH] = []
     ha = ctx.ha

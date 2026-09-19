@@ -295,11 +295,12 @@ def test_连续双押_负例_只有两个双押():
     assert "连续双押" not in _cfgs("(150){8}1/2,2/3,5,6,7,8,E")
 
 
-def test_侧边双押_突然无引导判红线_知识030():
-    # v0.2：判据来自 hands.side_double_events（突然 ∧ ¬引导）
+def test_侧边双押_无引导进复核清单_知识030():
+    # 判据来自 hands.side_double_events：只看**有没有引导**，"突然"不用数字定义
     h = _hits("(220){8}8,1,4,2/3,E", "侧边双押")
     assert len(h) == 1 and h[0].detail["redline"] is True
     assert h[0].detail["guided"] is False
+    assert "sudden" not in h[0].detail and "disp_cfg" not in h[0].detail
 
 
 def test_侧边双押_共享键步进有引导_负例_知识030B型():
@@ -623,6 +624,13 @@ def test_参数可整体替换():
     assert "一笔画" not in _cfgs(body, {"onestroke_min_len": 9})
 
 
-def test_待用户对齐的参数都在PARAMS里():
+def test_待用户对齐的参数已清空_用户20260920():
+    """agent 自造的阈值/分档不得作为问题抛给用户（用户 2026-09-20 五条批评）。
+
+    `PENDING_USER_PARAMS` 清空；原来的量化项全部转成内部操作化，登记在
+    `RESOLVED_USER_PARAMS` 里备查。
+    """
+    assert ch.PENDING_USER_PARAMS == ()
+    assert "chuzhang_min_cross" in ch.RESOLVED_USER_PARAMS
     for k in ch.PENDING_USER_PARAMS:
         assert k in ch.PARAMS, k

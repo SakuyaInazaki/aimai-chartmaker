@@ -7,8 +7,14 @@
 
 **v0.2（2026-09-19，用户讲授对齐）**：知识 064–067 与 019/030 的用户补充落地——
 舒适区模型取代分页二分、出张改按键位定义、撤销星头换手与末尾半边、纵连长度优先、
-段首按位置连续起手、侧边双押红线改成「突然 ∧ ¬引导」。逐项见 `docs/hand-sequencing.md` v0.2
+段首按位置连续起手。逐项见 `docs/hand-sequencing.md` v0.2
 与 `docs/research/hand-alignment-user-2026-09-19.md`；v0.1 参数集保留在 :data:`PARAMS_LEGACY`。
+
+**v0.3（2026-09-20，去量化）**：用户指出 agent 不能拿阈值去量化制谱判断——
+① **出张不分档**（一个布尔判定 + 计数，`w_chuzhang` 只是搜索用的内部代价）；
+② **侧边双押去掉"位移/间隔"两个阈值门**，只留知识 030 的原话逻辑「没有引导就是突然」，
+   且结果只作**复核清单**、不记无理；
+③ **纵连长度按"需要击打按键的 note"数**（tap/hold 头/星星头都算）。
 
 ======  ==========================================================
 064     **舒适区与出张**（用户）：左手 8765+1/4、右手 1234+8/5，共享区 {1,4,5,8}；
@@ -23,9 +29,10 @@
         轨道匀速、**启动拍上的 Tap（拍划）并入划动手法不另占手**、Wifi 视作双手
 007     划 slide 的手 = slide 末尾所在半边（**已被 065 降级为打分项/tie-breaker**）；
         四种换手定式；一笔画 = 一手拍一手划
-019     纵连：**长度 ≤3 个 tap 即使稍快也可单手**（用户补充，长度优先于速度）
-030     连续双押：**禁止突然的**侧边双押（23/67）——突然 = 位移大 ∨ 间隔小，
-        引导 = 双押带过来 / 18·87·76·65·54 / 18·23·45·67（用户补充）
+019     纵连：**长度 ≤3 个音即使稍快也可单手**（用户补充，长度优先于速度）；
+        "3 个以内"数的是**需要击打按键的 note**（tap / hold 头 / 星星头，用户 2026-09-20）
+030     连续双押：**禁止突然的**侧边双押（23/67）——**突然 = 没有引导**，
+        引导 = 双押带过来 / 18·87·76·65·54 / 18·23·45·67（用户补充）；不用数字定义
 008     无理五类（多押 / 内屏 / 叠键 / 外键 / 撞尾）与软/硬/绝对三级
 009     叠键红线：同判定区 < 2 帧 (33.3 ms) = 绝对无理
 010     外键：slide 启动后 200 ms 内同侧 Tap/Hold
@@ -84,6 +91,10 @@ except ImportError:  # pragma: no cover - 脚本入口
 
 FRAME = 1.0 / 60.0  # 知识 006：一帧 16.67 ms
 
+#: **需要击打按键的任务**（用户 2026-09-20：「只要需要击打按键的不就算吗？」）——
+#: tap、hold 的头、星星头都要按下一个键，纵连长度与双押配对都按这个口径数。
+_HIT_KINDS = ("tap", "hold", "star")
+
 # ---------------------------------------------------------------------------
 # 操作化参数（**agent 设定**，不是知识条目原文；默认值的来源写在注释里）
 # ---------------------------------------------------------------------------
@@ -91,10 +102,15 @@ FRAME = 1.0 / 60.0  # 知识 006：一帧 16.67 ms
 PARAMS: dict = {
     # ---- 手的可及模型（知识 064，用户 2026-09-19 讲授）----
     # "comfort" = 舒适区模型（**当前口径**）：共享区 {1,4,5,8} 两手零代价；
-    #             **出张** = 左手落 {2,3} / 右手落 {6,7}，单档、代价显著。
+    #             **出张** = 左手落 {2,3} / 右手落 {6,7}。
+    #             出张就是这一个**布尔判定**（`is_chuzhang`）+ 落点计数，没有档位/深度之分
+    #             （知识 064 只区分"是不是出张"；"跨到 6 还是 7、跨多久、跨多频繁"
+    #             用户没讲过，**本模块不得自造分档**）。
     # "page"    = v0.1 的分页二分 + 越界深度（知识 006/023），只在 PARAMS_LEGACY 里用。
     "hand_model": "comfort",
-    "w_chuzhang": 0.90,             # 出张代价（**agent 设定**；用户只说"轻易不要写"）
+    # 搜索时给出张记的代价（**agent 操作化的内部数字，不是术语、不是给用户看的分级**；
+    # 用户只说"轻易不要写"）。它的唯一作用是让搜索在"能不出张"时不要出张。
+    "w_chuzhang": 0.90,
     # 共享区 {1,4,5,8} 上两手都是 0 代价（知识 064），于是"1 该谁打"在模型里成了**完全平局**，
     # 解由束序偶然决定，还会给出两手交叉（左手 1 / 右手 8）这种物理上说不通的解。
     # 故保留一个**极小的几何 tie-breaker**：落在知识 006 分页的对侧 +0.01。
@@ -138,8 +154,10 @@ PARAMS: dict = {
     "w_same_key_extra": -0.22,
     # 知识 019 补充（用户 2026-09-19）：「理论上稍快且长度较小的纵连也可以单手处理
     # （长度较小指的是 3 个 tap 或以内）」→ **长度优先于速度**：
-    # 同键连续 tap 串长度 ≤ `vertical_single_hand_max` 时允许单手——不加 `w_same_hand`、
+    # 同键连续串长度 ≤ `vertical_single_hand_max` 时允许单手——不加 `w_same_hand`、
     # `w_same_key_extra` 全额给出、**免除速度项**（硬下界 t_hard_same 仍生效，知识 009）。
+    # **计数口径（用户 2026-09-20 原话：「只要需要击打按键的不就算吗？」）**：
+    # 同键连续串里 **tap / hold 头 / 星星头** 都算一个音（`_HIT_KINDS`），不再只数 tap。
     "vertical_length_first": True,
     "vertical_single_hand_max": 3,
     # 知识 067（用户 2026-09-19）：「先出手最好是离上一段结束的手，因为上一个配置把手
@@ -198,25 +216,19 @@ PARAMS: dict = {
     "hold_tail_win": 0.050,         # Hold 尾多押的判定窗口（知识 012）
     "path_brush": True,             # 轨道途经 A 区的"蹭键"检查（agent 推断，存疑）
     "path_brush_win": 0.060,        # 途经判定区的前后窗口（agent 推断）
-    # ---- 侧边双押红线（知识 030 的 2026-09-19 用户补充）----
-    # 用户原话把铁律读成「**禁止突然的**侧边双押」而不是「禁止侧边双押」：
-    #   突然 = ① 与谱面临近位置**位移较大** ∨ ② 与上一个配置**间隔过小**
+    # ---- 侧边双押（知识 030 铁律 + 2026-09-19 用户补充）----
+    # 知识 030 的原话逻辑只有一句：**禁止突然（＝没有引导）的侧边双押**。
     #   引导 = A 双押带过来 / B 18·87·76·65·54（共享键环上步进） / C 18·23·45·67（相邻键对等距轮转）
-    #   红线 = 突然 ∧ ¬引导
-    "side_double_redline": True,
+    #        （+ D 临近位置已经落在这两个键上——A 的单点版，知识 030 原表的"单点铺垫 → 双押串"）
+    #   红线 = 侧边双押 ∧ ¬引导
+    # ⚠️ **"突然"不用数字定义**（用户 2026-09-20：「什么是侧边双押位移大的阈值……
+    #    正常写谱谁去特意算这些事情」）——v0.2 曾有的"位移 ≥4 格 / 间隔 ≤140 ms"两个
+    #    阈值门已整体删除，不再是规则的一部分。
+    # ⚠️ 判定结果**只作复核清单**（`HandAssignment.side_doubles`），**不记无理**：
+    #    "引导"的四型是 agent 按用户三个例子归纳的，覆盖不全（388 官谱上有 307 次
+    #    落在四型之外），把它当自动硬无理等于替用户下结论。人看清单、人裁定。
     "side_guide_gap_beats": 1.0,    # 相邻两组双押算"连续"的间隔上限（拍；同 configs 口径）
-    # ① 位移阈值：`disp_cfg`（配置整体离"谱面临近位置"的最小环距）≥ 此值算"突然"。
-    #    388 官谱标定（验证报告 v0.2 §S）：无引导侧边双押 307 次，`disp_cfg` 分布
-    #    {1:221, 2:66, 3:20}，**从不到 4**；而 4 对侧边双押其实**结构上不可达**
-    #    （环上任一键到 {2,3} 两键的最小距离 ≤3）。即"官谱从不越过"与"≤1% 分位"
-    #    两条线都落在 4 上 → **位移这条腿在官谱上标不出有效线**，默认取 4（= 不触发）。
-    #    若用户要让它起作用，改 3 会在 388 官谱上标出 20 次（3.0%），逐条列在报告里。
-    "side_sudden_disp": 4,
-    "side_near_slots": 2,           # "谱面临近位置"取前面几个任务组（agent 操作化）
-    # ② 间隔阈值：距上一个任务组 ≤ 此值算"突然"。
-    #    388 官谱标定：无引导侧边双押的最小间隔 **142.9 ms**（= 210 BPM 的一个八分，
-    #    与知识 011 的容忍线同数），1% 分位 150 ms → 取 0.140 s 作"官谱从不越过"的线。
-    "side_sudden_gap_sec": 0.140,
+    "side_near_slots": 2,           # "临近位置"取前面几个任务组（agent 操作化，内部口径）
     "side_rotation_min_run": 3,     # C 型等距轮转所需的最短双押串长
     # ---- 搜索 ----
     "beam": 48,
@@ -225,7 +237,8 @@ PARAMS: dict = {
 
 #: **v0.1 旧口径**（提交 4942759 的参数集），保留供新旧对照用。
 #: 差别：分页二分 + 越界深度（006/023）、`w_star_switch` 与 `w_slide_end_side` 在位、
-#: 纵连按速度线拆手、段首不作特殊处理、无侧边双押红线。
+#: 纵连按速度线拆手、段首不作特殊处理。
+#: （侧边双押的复核清单与它无关——那是纯诊断输出，两套参数下都会算。）
 PARAMS_LEGACY: dict = dict(PARAMS)
 PARAMS_LEGACY.update({
     "hand_model": "page",
@@ -240,7 +253,6 @@ PARAMS_LEGACY.update({
     "vertical_length_first": False,
     "w_seg_start_far": 0.0,
     "seg_reset_alternation": False,
-    "side_double_redline": False,
 })
 
 _RIGHT_HOME = frozenset({1, 2, 3, 4})   # 知识 006：右手分页
@@ -409,9 +421,9 @@ class HandTask:
     feeds: tuple[int, ...] = ()        # 本任务顺带打下的星星头所属的轨道任务下标
     wait_of: tuple[int, ...] = ()      # 落在哪些 slide 的"启动拍等待期"里（错位窗口）
     misalign_taps: tuple[int, ...] = ()  # （轨道任务用）落在本条轨道错位窗口里的任务
-    #: 本任务所在的**同键连续 tap 串**长度（知识 019 用户补充：≤3 可单手）；
-    #: 非 tap 或不在串里时 = 1。只统计 ``tap``——用户原话说的就是"3 个 tap 或以内"，
-    #: 混入 hold / 星星头的情形原话未涉及（知识 019 补充里记的待确认项 2）。
+    #: 本任务所在的**同键连续串**长度（知识 019 用户补充：≤3 可单手）；不在串里时 = 1。
+    #: 计数口径 = **所有需要击打按键的 note**（tap / hold 头 / 星星头，见 :data:`_HIT_KINDS`）
+    #: ——用户 2026-09-20 原话：「只要需要击打按键的不就算吗？」
     vrun_len: int = 1
     t_end_nominal: float = 0.0         # 引导星按匀速到达终点的名义时刻
     t_end_max: float = 0.0             # 最晚放手时刻（名义尾 + 知识 048 容错）
@@ -518,8 +530,8 @@ class HandAssignment:
     #: 因此与 :attr:`muri` 分开：软级的撞尾/外键/路径蹭键归这里，硬/绝对仍算无理。
     scrape: list[HandMuri] = field(default_factory=list)
     infeasible: list[HandMuri] = field(default_factory=list)
-    #: 全谱侧边双押事件（知识 030 用户补充的「突然 / 引导 / 红线」三判），
-    #: 见 :func:`side_double_events`
+    #: 全谱侧边双押事件（知识 030：每一处**有没有引导**）。``guided=False`` 的那些
+    #: 就是**供人复核的清单**——不记无理、不下判决，见 :func:`side_double_events`。
     side_doubles: list[dict] = field(default_factory=list)
     total_cost: float = 0.0
     n_tasks: int = 0
@@ -793,15 +805,18 @@ def build_tasks(res: ParseResult | Sequence[NoteEvent],
         if ti >= 0:
             n2t.setdefault(j, ti)
 
-    # 同键连续 tap 串的长度（知识 019 的 2026-09-19 用户补充：长度优先于速度）。
-    # "连续"= 在任务时间序里**紧挨着**且键位相同的一段 tap（中间夹了别的键就断开）。
+    # 同键连续串的长度（知识 019 的 2026-09-19 用户补充：长度优先于速度）。
+    # "连续"= 在任务时间序里**紧挨着**且键位相同的一段（中间夹了别的键就断开）。
+    # **计数口径（用户 2026-09-20）**：「只要需要击打按键的不就算吗？」——
+    # tap / hold 头 / 星星头都要按下这个键，一律计入（`_HIT_KINDS`）。
+    # v0.2 只数 tap 是照原话"3 个 tap 或以内"的字面取的，已被用户这句话否掉。
     i = 0
     while i < len(kept):
-        if kept[i].kind != "tap" or kept[i].key is None:
+        if kept[i].kind not in _HIT_KINDS or kept[i].key is None:
             i += 1
             continue
         j = i
-        while (j + 1 < len(kept) and kept[j + 1].kind == "tap"
+        while (j + 1 < len(kept) and kept[j + 1].kind in _HIT_KINDS
                and kept[j + 1].key == kept[i].key
                and kept[j + 1].t > kept[j].t + 1e-9):
             j += 1
@@ -1303,6 +1318,7 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
         out.muri.append(hm)
         if level == "绝对" and kind in ("多押", "占用冲突", "超速"):
             out.infeasible.append(hm)
+    # 侧边双押复核清单（知识 030）：只标"有没有引导"，不记无理（见 side_double_events）
     out.side_doubles = side_double_events(tasks, out.task_hand, p)
     out.muri.extend(detect_hand_muri(notes, tasks, out.task_hand, p))
     out.muri.sort(key=lambda m: m.time)
@@ -1320,7 +1336,6 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
 
 
 _SIDE_DOUBLE_SETS = (frozenset({2, 3}), frozenset({6, 7}))
-_HIT_KINDS = ("tap", "hold", "star")
 
 
 def _pair_anchor(keys: frozenset[int]) -> int | None:
@@ -1337,18 +1352,29 @@ def _pair_anchor(keys: frozenset[int]) -> int | None:
 
 def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
                        p: dict) -> list[dict]:
-    """列出全谱的**侧边双押**（``{2,3}`` / ``{6,7}``）并判「突然」与「引导」。
+    """列出全谱的**侧边双押**（``{2,3}`` / ``{6,7}``）并标注**有没有引导**。
 
-    知识 030 的 2026-09-19 用户补充把铁律读成「**禁止突然的**侧边双押」：
+    知识 030 的铁律原话只有一句：**禁止突然（＝没有引导）的侧边双押**——
+    「除非前期做好了充分多的引导，不然禁止随便写侧边双押」。用户 2026-09-19 给的
+    「引导」有三个例子：A「双押带过来」/ B ``18·87·76·65·54``/ C ``18·23·45·67``。
 
-    - **突然** = ① 与谱面临近位置**位移较大** ∨ ② 与上一个配置**间隔过小**；
-    - **引导** = A「双押带过来」/ B ``18·87·76·65·54``/ C ``18·23·45·67``；
-    - **红线** = 突然 ∧ ¬引导。
+    本函数把 A/B 合并成「**与前一组双押共享键**」（前面的连续双押靠共享键步进把手
+    带到侧边，两例同型），C 实现成「**整串都是相邻键对且锚等距轮转**」，另加
+    D「**临近位置已经落在这两个键上**」（＝知识 030 原表的"单点铺垫 → 双押串"，
+    A 的单点版）。四型都是**形状判定**，没有任何数值门槛。
 
-    本函数把 A/B 合并成「**与前一组双押共享键**」（主会话解读：前面的连续双押靠共享键
-    步进把手带到侧边，A 与 B 同型），C 实现成「**整串都是相邻键对且锚等距轮转**」。
-    两个「突然」阈值（``side_sudden_disp`` / ``side_sudden_gap_sec``）是
-    **agent 操作化**，取值由 388 官谱标定（见验证报告 v0.2 一节）。
+    ``redline = not guided``。
+
+    ⚠️ **"突然"不用数字定义**（用户 2026-09-20：「什么是侧边双押位移大的阈值，不是，
+    你怎么能量化来分析这些事情呢？正常写谱谁去特意算这些事情。」）——v0.2 曾用
+    "位移 ≥4 格 ∨ 间隔 ≤140 ms" 当"突然"的门，两个阈值已整体删除。
+
+    ⚠️ **输出是复核清单，不是判决**：上面四型是 agent 按用户三个例子归纳的，
+    覆盖不全（388 官谱上 307 次侧边双押落在四型之外），所以 ``redline=True``
+    只表示"这一处请人看一眼"，`assign()` **不**据此记无理。
+
+    事件里的 ``near_dist`` / ``gap`` 是**诊断字段**（离临近位置多少格、距上一个任务组
+    多少秒），只为人看清单时定位方便，**不参与任何判定**。
     """
     tol = p["simul_tol"]
     # 1) 同刻双手对（只看击打：tap / hold / 星星头）
@@ -1425,7 +1451,7 @@ def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
         guided_c = i in rotation_run
         guided = prev_shared or guided_c
         guide_type_set = "A/B" if prev_shared else "C" if guided_c else ""
-        # 「突然」①：与谱面临近位置的位移
+        # D 型引导 + 两个诊断字段（离临近位置多少格 / 距上一个任务组多久）
         li, ri_ = d["L"].index, d["R"].index
         pl, pr, pt, nk = snap.get(li, (None, None, -1e9, frozenset()))
         pl2, pr2, pt2, nk2 = snap.get(ri_, (None, None, -1e9, frozenset()))
@@ -1435,36 +1461,30 @@ def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
         nk = nk | nk2
         dl = cdist(pl, d["L"].key) if pl is not None else 4
         dr = cdist(pr, d["R"].key) if pr is not None else 4
-        # `disp` = 两只手各自要飞多远（取大者）——侧边双押必有一手出张，这一项是
-        #   **结构性**的，388 官谱上不构成区分（见验证报告 v0.2 的标定）；
-        # `disp_cfg` = **配置整体**离"谱面临近位置"多远（与谁打无关）——
-        #   = 临近 `side_near_slots` 个任务组的键到本组两键的最小环距，
-        #   这才是用户原话"与谱面临近位置位移较大"的直读。
-        disp = max(dl, dr)
-        # 谱面开头（前面什么都没有）不存在"突然出现"——玩家有整段时间看这一组，
-        # 记 0 并在下面被 D 型吸收（agent 操作化）。
-        disp_cfg = (min(cdist(k, m) for k in ks for m in nk) if nk else 0)
+        # `hand_dist`（诊断）= 两只手各自要飞多远（取大者）；
+        # `near_dist`（诊断 + D 型判定）= 临近 `side_near_slots` 个任务组的键到本组
+        #   两键的最小环距。谱面开头（前面什么都没有）记 0。
+        hand_dist = max(dl, dr)
+        near_dist = (min(cdist(k, m) for k in ks for m in nk) if nk else 0)
         gap = t - pt if pt > -1e8 else 1e9
-        # D 型引导：**临近位置已经落在这两个键上**（`disp_cfg == 0`）——手本来就在那儿。
+        # D 型引导：**临近位置已经落在这两个键上**（`near_dist == 0`）——手本来就在那儿。
         # 依据是知识 030「类型与实例」表里原有的「**单点铺垫 → 双押串**」一型（+♂ 谱例），
-        # 是用户 A 型「双押带过来」的单点版；**agent 操作化**，用户原话未直接列这一型。
-        guided_d = disp_cfg == 0
+        # 是用户 A 型「双押带过来」的单点版。这是**形状**判定，不是阈值。
+        guided_d = near_dist == 0
         guided = guided or guided_d
         if guided_d and not guide_type_set:
             guide_type_set = "D"
-        sudden_disp = disp_cfg >= p["side_sudden_disp"]
-        sudden_gap = gap <= p["side_sudden_gap_sec"]
-        sudden = sudden_disp or sudden_gap
         out.append({
             "measure": d["L"].measure, "time": t,
             "keys": sorted(ks), "L": d["L"].key, "R": d["R"].key,
-            "disp": disp, "disp_l": dl, "disp_r": dr, "disp_cfg": disp_cfg,
+            # ↓ 三个纯诊断字段，不参与判定
+            "hand_dist": hand_dist, "disp_l": dl, "disp_r": dr,
+            "near_dist": near_dist,
             "gap": round(gap, 4) if gap < 1e8 else None,
             "run_len": len(runs[ri]), "pos_in_run": pos,
+            # ↓ 判定：只有"有没有引导"这一件事
             "guided": guided, "guide_type": guide_type_set,
-            "sudden": sudden,
-            "sudden_kind": ("位移" if sudden_disp else "") + ("间隔" if sudden_gap else ""),
-            "redline": bool(sudden and not guided),
+            "redline": not guided,
         })
     return out
 
@@ -1618,16 +1638,10 @@ def detect_hand_muri(notes: Sequence[NoteEvent], tasks: Sequence[HandTask],
             out.append(HandMuri("换手拧巴", "软", d["L"].measure, d["L"].t,
                                 f"左手在 {lk}、右手在 {rk}（交叉深度 {dep}）"))
 
-    # 突然的侧边双押（知识 030 铁律 + 用户 2026-09-19 的"突然/引导"定义）
-    if p["side_double_redline"]:
-        for ev in side_double_events(tasks, task_hand, p):
-            if not ev["redline"]:
-                continue
-            gs = f"{ev['gap'] * 1000:.0f} ms" if ev["gap"] is not None else "—"
-            out.append(HandMuri(
-                "突然侧边双押", "硬", ev["measure"], ev["time"],
-                f"{ev['keys'][0]}/{ev['keys'][1]}：距临近位置 {ev['disp_cfg']} 格、"
-                f"距上一配置 {gs}（{ev['sudden_kind']}突然），且无引导"))
+    # ⚠️ 知识 030 的「突然（＝无引导）的侧边双押」**不在这里记无理**：
+    #    "引导"的四型是 agent 按用户三个例子归纳的、覆盖不全，把它当自动判决
+    #    等于替用户下结论。无引导的侧边双押以**复核清单**的形式出在
+    #    `HandAssignment.side_doubles`（`side_double_events()`），由人裁定。
     return out
 
 
@@ -1759,6 +1773,10 @@ def chart_summary(ha: HandAssignment) -> dict:
         "chuzhang_end_side_per_slide": round(
             sum(b.chuzhang_end_side for b in bars)
             / max(1, sum(1 for t in ha.tasks if t.kind in ("slide", "wifi"))), 4),
+        # 侧边双押复核清单（知识 030）：总数与"没有引导、请人看一眼"的数量。
+        # **不是判决**——见 `side_double_events()` 的说明。
+        "side_double": len(ha.side_doubles),
+        "side_double_unguided": sum(1 for e in ha.side_doubles if not e["guided"]),
         "scrape_pressure": len(ha.scrape),
         "scrape_per_1k": round(1000 * len(ha.scrape) / max(1, ha.n_tasks), 3),
         "n_infeasible": len(ha.infeasible),

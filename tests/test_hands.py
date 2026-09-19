@@ -114,9 +114,34 @@ def test_出张计数按064口径_负例_共享键不计():
 # ---------------------------------------------------------------------------
 
 
-def test_短纵连三个tap可单手_知识019补充():
+def test_短纵连三个音可单手_知识019补充():
     # 185BPM {16} ≈ 81 ms/音，已过单手舒适线 83.3 ms；但长度 ≤3 → 允许单手
     assert _hands("(185){16}1,1,1,,,,,,E") in ("1R 1R 1R", "1L 1L 1L")
+
+
+def test_短纵连计数含星星头与hold头_用户20260920():
+    """用户原话：「只要需要击打按键的不就算吗？」——tap / hold 头 / 星星头都算一个音。
+
+    同键三连里第二下换成星星头，长度仍然是 3（v0.2 只数 tap，会把它断成 1+1）。
+    """
+    ha = _assign("(185){16}1,1-5[8:1],1,,,,,,E")
+    hits = [t for t in ha.tasks if t.key == 1 and t.kind in hd._HIT_KINDS]
+    assert len(hits) == 3 and {t.vrun_len for t in hits} == {3}
+
+    # hold 头同理（hold 的尾会占住手，所以这里只钉计数口径，不看分配结果）
+    ha2 = _assign("(185){16}1,1h[8:1],1,,,,,,E")
+    hits2 = [t for t in ha2.tasks if t.key == 1 and t.kind in hd._HIT_KINDS]
+    assert len(hits2) == 3 and {t.vrun_len for t in hits2} == {3}
+
+
+def test_混入击打音的同键四连按长度4拆手_用户20260920():
+    """反过来：三个 tap + 一个 hold 头 = 4 个击打音 > 3 → 回到速度线判"拆"。
+
+    v0.2 只数 tap，会把它当成"3 连"放过；用户口径下它是 4 连。
+    """
+    ha = _assign("(185){16}1,1,1,1h[8:1],,,,,E")
+    lens = {t.vrun_len for t in ha.tasks if t.key == 1}
+    assert lens == {4}
 
 
 def test_长纵连仍按速度拆手_知识019():
@@ -149,22 +174,31 @@ def test_就近起手若造成出张则避开_知识067与064():
 
 
 # ---------------------------------------------------------------------------
-# 侧边双押：突然 ∧ ¬引导（知识 030 的 2026-09-19 用户补充）
+# 侧边双押：有没有引导（知识 030；2026-09-20 去掉"突然"的阈值定义）
 # ---------------------------------------------------------------------------
 
 
-def test_侧边双押_突然且无引导判红线_知识030():
+def test_侧边双押_无引导进复核清单_知识030():
     ha = _assign("(220){8}8,1,4,2/3,E")
     ev = ha.side_doubles
     assert len(ev) == 1 and ev[0]["redline"] and not ev[0]["guided"]
-    assert "间隔" in ev[0]["sudden_kind"]
-    assert any(m.kind == "突然侧边双押" for m in ha.muri)
 
 
-def test_侧边双押_间隔够大就不突然_负例():
-    ha = _assign("(150){8}8,1,4,2/3,E")
-    assert ha.side_doubles and not ha.side_doubles[0]["redline"]
-    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+def test_侧边双押_无引导不因为间隔变大就翻案_去阈值():
+    # 同一形态只把 BPM 从 220 降到 150（间隔从 136 ms 变成 200 ms）。
+    # v0.2 会因为越过 140 ms 的"间隔阈值"翻成"不突然"；去阈值后判定只看有没有引导。
+    fast = _assign("(220){8}8,1,4,2/3,E").side_doubles[0]
+    slow = _assign("(150){8}8,1,4,2/3,E").side_doubles[0]
+    assert fast["redline"] and slow["redline"]
+    assert not fast["guided"] and not slow["guided"]
+
+
+def test_侧边双押_永不记无理_只作复核清单():
+    # 无引导的侧边双押是"请人看一眼"，不是自动判决（"引导"的四型覆盖不全）
+    for body in ("(220){8}8,1,4,2/3,E", "(150){8}8,1,4,2/3,E"):
+        ha = _assign(body)
+        assert any(e["redline"] for e in ha.side_doubles)
+        assert not any("侧边双押" in m.kind for m in ha.muri + ha.scrape)
 
 
 def test_侧边双押_共享键步进算引导_知识030B型():
@@ -172,7 +206,7 @@ def test_侧边双押_共享键步进算引导_知识030B型():
     ha = _assign("(120){4}1/8,8/7,7/6,6/5,5/4,E")
     ev = [e for e in ha.side_doubles if e["keys"] == [6, 7]]
     assert ev and ev[0]["guided"] and ev[0]["guide_type"] == "A/B"
-    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+    assert not ev[0]["redline"]
 
 
 def test_侧边双押_等距轮转算引导_知识030C型():
@@ -181,7 +215,15 @@ def test_侧边双押_等距轮转算引导_知识030C型():
     ks = {tuple(e["keys"]): e for e in ha.side_doubles}
     assert (2, 3) in ks and (6, 7) in ks
     assert all(e["guided"] and e["guide_type"] == "C" for e in ks.values())
-    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+    assert not any(e["redline"] for e in ks.values())
+
+
+def test_侧边双押_判定里不留任何阈值参数():
+    # 用户 2026-09-20：「怎么能量化来分析这些事情呢」——"突然"不再有数值门
+    assert "side_sudden_disp" not in hd.PARAMS
+    assert "side_sudden_gap_sec" not in hd.PARAMS
+    ev = _assign("(220){8}8,1,4,2/3,E").side_doubles[0]
+    assert "sudden" not in ev and "sudden_kind" not in ev
 
 
 # ---------------------------------------------------------------------------
