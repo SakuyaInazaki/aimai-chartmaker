@@ -13,6 +13,7 @@
 | `stemhit.py` | 官方 note 时间 × 各 stem onset 的匹配（命中率 / 精确率 / 全局相位扫描） |
 | `weights.py` | 五项 Z 特征 → 密度的非负最小二乘 / 岭回归 + 留一曲交叉验证 |
 | `ending.py` | 结尾形态（尾杀 / 渐弱 / 其他）判据与敏感性 |
+| `sampling.py` | **采音模式度量**：逐小节 coverage / extra / 隔一个·只踩强拍 / 留白，落成 全采·半采·稀采(空音)·加花·静默·混合 六类 + 随机平移对照（报告 `docs/research/sampling-mode-study.md`） |
 | `loader.py` | 从 `out/calib/<曲名>/` 装载一首曲子的音频侧与谱面侧数据（含 IO） |
 | `cli.py` | 命令行入口：跑完全部分析，写 CSV / 图 / 指标 JSON |
 
@@ -21,4 +22,4 @@
 
 __version__ = "0.1.0"
 
-__all__ = ["chartpair", "ending", "stemhit", "weights"]
+__all__ = ["chartpair", "ending", "sampling", "stemhit", "weights"]

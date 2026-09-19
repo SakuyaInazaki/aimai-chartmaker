@@ -4,6 +4,7 @@
 ------
 - :mod:`.simai_parser` — simai 正文解析（时间轴 + note 事件）
 - :mod:`.density` — 逐小节密度统计、曲线重采样、聚类、五段模板检验
+- :mod:`.configs` — 配置识别（知识 017–030）+ 逐小节配置硬度分
 - :mod:`.corpus` — 官方谱语料发现与 manifest 元数据关联
 - :mod:`.cli` — 命令行入口（``python3 -m chart_analysis.cli --help``）
 """
