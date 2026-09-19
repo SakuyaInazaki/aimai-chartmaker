@@ -7,6 +7,8 @@ __pycache__/
 .venv/
 # basic-pitch 专用的 py3.11 venv（uv 建，见 tools/audio_analysis/README.md v0.5）
 .venv-pitch/
+# 视频帧 OCR 专用的 py3.11 venv（rapidocr-onnxruntime，见 docs/research/video-materials-index.md）
+.venv-ocr/
 venv/
 *.egg-info/
 dist/
