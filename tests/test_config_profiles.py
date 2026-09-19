@@ -213,41 +213,41 @@ def test_lift表():
 
 
 def test_矩阵两份榜():
-    rows = ([{"pool_tier": "密", "I_tier": "高", "configs": ["稀有"], "mode": "半采音",
+    rows = ([{"pool_tier": "密", "I_tier": "高", "configs": ["稀有"], "mode": "舍音",
               "coverage": 0.5}] * 12
-            + [{"pool_tier": "密", "I_tier": "高", "configs": ["常见"], "mode": "采全音",
+            + [{"pool_tier": "密", "I_tier": "高", "configs": ["常见"], "mode": "全踩",
                 "coverage": 0.9}] * 20
-            + [{"pool_tier": "稀", "I_tier": "低", "configs": ["常见"], "mode": "采全音",
+            + [{"pool_tier": "稀", "I_tier": "低", "configs": ["常见"], "mode": "全踩",
                 "coverage": 0.9}] * 200)
     m = cpf.recommend_matrix(rows, min_count=10)
     cell = m["密|高"]
     assert cell["n"] == 32
     assert cell["top_configs"][0]["config"] == "稀有"      # lift 榜
     assert cell["top_common"][0]["config"] == "常见"       # 出现率榜
-    assert cell["top_modes"][0]["mode"] == "采全音"
+    assert cell["top_modes"][0]["mode"] == "全踩"
     assert 0.5 < cell["coverage"] < 0.9
 
 
 def test_矩阵按min_count挡掉小样本():
-    rows = ([{"pool_tier": "密", "I_tier": "高", "configs": ["稀有"], "mode": "半采音"}] * 3
-            + [{"pool_tier": "密", "I_tier": "高", "configs": ["常见"], "mode": "采全音"}] * 30)
+    rows = ([{"pool_tier": "密", "I_tier": "高", "configs": ["稀有"], "mode": "舍音"}] * 3
+            + [{"pool_tier": "密", "I_tier": "高", "configs": ["常见"], "mode": "全踩"}] * 30)
     m = cpf.recommend_matrix(rows, min_count=10)
     assert [c["config"] for c in m["密|高"]["top_configs"]] == ["常见"]
 
 
 def test_外在放置画像():
-    rows = [{"configs": ["甲"], "I_bar": 0.9, "I_tier3": "高", "mode": "半采音",
+    rows = [{"configs": ["甲"], "I_bar": 0.9, "I_tier3": "高", "mode": "舍音",
              "coverage": 0.5, "pos": 0.8},
-            {"configs": ["甲"], "I_bar": 0.8, "I_tier3": "高", "mode": "采全音",
+            {"configs": ["甲"], "I_bar": 0.8, "I_tier3": "高", "mode": "全踩",
              "coverage": 0.9, "pos": 0.6},
-            {"configs": ["乙"], "I_bar": 0.1, "I_tier3": "低", "mode": "空音",
+            {"configs": ["乙"], "I_bar": 0.1, "I_tier3": "低", "mode": "留白",
              "coverage": 0.2, "pos": 0.1}]
     pl = cpf.placement_by_config(rows)
     assert pl["甲"]["n_bars"] == 2
     assert abs(pl["甲"]["I_mean"] - 0.85) < 1e-9
     assert abs(pl["甲"]["coverage"] - 0.7) < 1e-9
     assert pl["甲"]["lift_I_高"] > 1.0 and pl["乙"]["lift_I_低"] > 1.0
-    assert abs(pl["甲"]["mode_半采音"] - 0.5) < 1e-9
+    assert abs(pl["甲"]["mode_舍音"] - 0.5) < 1e-9
 
 
 def test_空谱不炸():

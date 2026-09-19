@@ -89,11 +89,11 @@ def test_pool去重取簇内最强的那个事件():
     assert abs(t[0] - 1.02) < 1e-9 and abs(s[0] - 0.9) < 1e-9
 
 
-def test_没有网格判据_挑不挑重音都是半采音():
+def test_没有网格判据_挑不挑重音都是舍音():
     """判定链上没有任何分音 / BPM / 网格量（2026-09-19 修订）；
 
-    "挑不挑重音"从 2026-09-20 起**不再各自撑起一个类名**——两种都是用户说的
-    「半采音」（有选择地只踩一部分），是不是踩重音只留 ``accent`` 诊断标记。
+    "挑不挑重音"从 2026-09-20 起**不再各自撑起一个类名**——两种都是社区说的
+    「舍音」（只踩一部分、舍掉另一部分），是不是踩重音只留 ``accent`` 诊断标记。
     """
     pool = _grid(8, 0.25)                  # 16 分
     ev = pool[::2]                         # 隔一个踩 = 落在 8 分整拍上
@@ -101,10 +101,10 @@ def test_没有网格判据_挑不挑重音都是半采音():
     m = sp.bar_metrics(ev, 4, pool, pool, 0.0, BAR, BPB, st)
     assert abs(m["coverage"] - 0.5) < 1e-9
     assert not m["accent"]
-    assert m["mode"] == "半采音"
-    # 同样的"隔一个"，踩强的那一半：类名不变，只是 accent 标记翻正
+    assert m["mode"] == "舍音"
+    # 同样的"隔一个"，踩强的那一半：类名不变，只是 accent 标记翻正（社区叫"主高"）
     m2 = sp.bar_metrics(ev, 4, pool, pool, 0.0, BAR, BPB, _alt_strength(8))
-    assert m2["mode"] == "半采音" and m2["accent"]
+    assert m2["mode"] == "舍音" and m2["accent"]
 
 
 # ---------------------------------------------------------------------------
@@ -170,39 +170,55 @@ def test_挑重音_margin可整体替换():
 
 
 # ---------------------------------------------------------------------------
-# 采音方式：只有用户的三个词（2026-09-20 术语修正）
+# 采音方式：只有社区的三个词（2026-09-20 术语校正，见
+# docs/research/sampling-terminology-survey.md）
 # ---------------------------------------------------------------------------
 
 
-def test_采音方式只有用户的三个词():
-    """用户原话：「是采全音、空音还是半采音等等」；
+def test_采音方式只有社区的三个词():
+    """用户 2026-09-20：「这些词是我编的，你自己去社区去论坛搜索自己对应去。」
 
-    「近全采 / 随机半采 / 加花 / 静默 / 混合」都是 agent 臆造的类名，已删除。
+    调研结论：社区说 **全踩**（MMFC 5.4「全踩人声」）、**舍音**（谱师自述
+    「定下了舍采音的基调」）、**留白**（「红谱里留白的例子也不少」）。
+    用户自造的 `采全音 / 半采音 / 空音` 与 agent 自造的
+    「近全采 / 随机半采 / 加花 / 静默 / 混合」一律不得出现在对外输出里。
     """
-    assert sp.MODE_ORDER == ("采全音", "半采音", "空音")
+    assert sp.MODE_ORDER == ("全踩", "舍音", "留白")
     assert sp.UNKNOWN == "—"
-    for bad in ("近全采", "随机半采", "稀采/空音", "加花", "静默", "混合"):
+    for bad in ("采全音", "半采音", "空音",
+                "近全采", "随机半采", "稀采/空音", "加花", "静默", "混合"):
         assert bad not in sp.MODE_ORDER
 
 
-def test_采全音():
-    assert sp.classify(0.90, 0.10, 8, 8, False) == "采全音"
-    assert sp.classify(0.66, 0.10, 8, 8, False) == "采全音"     # 不再有"近全采"那一档
-    # 谱面另外写了别处的音（extra 多）也不改采音方式——extra 只是诊断字段
-    assert sp.classify(0.90, 0.60, 10, 8, False) == "采全音"
+def test_空音这个词必须停用_社区里它是反义词():
+    """萌娘百科《音乐游戏/用语》「采空音」= 谱面**多**写了音（音乐里没音却塞音符）；
+
+    用户口中的「空音」是谱面**少**写了音。词义相反，所以停用，改叫「留白」。
+    旧词只保留在 ``LEGACY_MODE_ALIASES`` 里给读旧报告的人对照。
+    """
+    assert "空音" not in sp.MODE_ORDER
+    assert sp.LEGACY_MODE_ALIASES == {"采全音": "全踩", "半采音": "舍音", "空音": "留白"}
+    assert set(sp.LEGACY_MODE_ALIASES.values()) == set(sp.MODE_ORDER)
 
 
-def test_半采音():
-    assert sp.classify(0.50, 0.10, 4, 8, True) == "半采音"
-    # 挑不挑重音都是半采音（accent 只是诊断标记）
-    assert sp.classify(0.50, 0.10, 4, 8, False) == "半采音"
-    assert sp.classify(0.40, 0.10, 6, 15, False) == "半采音"
+def test_全踩():
+    assert sp.classify(0.90, 0.10, 8, 8, False) == "全踩"
+    assert sp.classify(0.66, 0.10, 8, 8, False) == "全踩"     # 不再有"近全采"那一档
+    # 谱面另外写了别处的音（extra 多，社区叫"采空音"）也不改采音方式——只是诊断字段
+    assert sp.classify(0.90, 0.60, 10, 8, False) == "全踩"
 
 
-def test_空音要音乐真的在响():
-    assert sp.classify(0.20, 0.10, 3, 15, False) == "空音"
-    # 谱面这一小节几乎不写音、而音轨在响 → 就是空音（不再叫"静默"）
-    assert sp.classify(0.00, 0.00, 0, 12, False) == "空音"
+def test_舍音():
+    assert sp.classify(0.50, 0.10, 4, 8, True) == "舍音"
+    # 挑不挑重音都是舍音（accent 只是诊断标记）
+    assert sp.classify(0.50, 0.10, 4, 8, False) == "舍音"
+    assert sp.classify(0.40, 0.10, 6, 15, False) == "舍音"
+
+
+def test_留白要音乐真的在响():
+    assert sp.classify(0.20, 0.10, 3, 15, False) == "留白"
+    # 谱面这一小节几乎不写音、而音轨在响 → 就是留白（不再叫"静默"/"空音"）
+    assert sp.classify(0.00, 0.00, 0, 12, False) == "留白"
     # pool 太小 = 没音可踩，不下结论
     assert sp.classify(0.20, 0.10, 3, 3, False) == sp.UNKNOWN
 
@@ -215,8 +231,8 @@ def test_判不出的小节不下结论():
 def test_内部切点可整体替换_只是诊断口径():
     th = dict(sp.THRESHOLDS)
     th["full_lo"] = 0.40
-    assert sp.classify(0.50, 0.0, 8, 8, False, th) == "采全音"
-    assert sp.classify(0.50, 0.0, 8, 8, False) == "半采音"
+    assert sp.classify(0.50, 0.0, 8, 8, False, th) == "全踩"
+    assert sp.classify(0.50, 0.0, 8, 8, False) == "舍音"
 
 
 # ---------------------------------------------------------------------------
@@ -273,30 +289,30 @@ def _toy(regular: bool = True):
     return bars, slots, notes, {"drums": np.array(pool)}, {"drums": np.array(st)}
 
 
-def test_整曲_全踩时两小节都是采全音():
+def test_整曲_全部踩上时两小节都是全踩():
     bars, slots, notes, stems, st = _toy()
     rows = sp.song_sampling(bars, slots, notes, stems, skeleton_mode="drums",
                             stem_strengths=st)
-    assert [r.mode for r in rows] == ["采全音", "采全音"]
+    assert [r.mode for r in rows] == ["全踩", "全踩"]
     assert all(r.skeleton == "drums" for r in rows)
     assert all(abs(r.coverage - 1.0) < 1e-9 for r in rows)
 
 
-def test_整曲_只踩强音那一半是半采音():
+def test_整曲_只踩强音那一半是舍音():
     bars, slots, notes, stems, st = _toy()
     half = [t for t, s in zip(slots, st["drums"]) if s > 0.5]
     rows = sp.song_sampling(bars, half, {0: 4, 1: 4}, stems,
                             skeleton_mode="drums", stem_strengths=st)
-    assert [r.mode for r in rows] == ["半采音", "半采音"]
+    assert [r.mode for r in rows] == ["舍音", "舍音"]
     assert all(r.accent for r in rows)
 
 
-def test_整曲_踩弱音那一半也是半采音():
+def test_整曲_踩弱音那一半也是舍音():
     bars, slots, notes, stems, st = _toy()
     weak = [t for t, s in zip(slots, st["drums"]) if s <= 0.5]
     rows = sp.song_sampling(bars, weak, {0: 4, 1: 4}, stems,
                             skeleton_mode="drums", stem_strengths=st)
-    assert [r.mode for r in rows] == ["半采音", "半采音"]
+    assert [r.mode for r in rows] == ["舍音", "舍音"]
     assert not any(r.accent for r in rows)      # 只有诊断标记不同
 
 
@@ -304,7 +320,7 @@ def test_整曲_逐小节字典可序列化():
     bars, slots, notes, stems, st = _toy()
     d = sp.song_sampling(bars, slots, notes, stems, skeleton_mode="drums",
                          stem_strengths=st)[0].to_dict()
-    assert d["mode"] == "采全音" and d["bar"] == 1 and d["coverage"] == 1.0
+    assert d["mode"] == "全踩" and d["bar"] == 1 and d["coverage"] == 1.0
     assert set(d) >= {"bar", "chart_measure", "skeleton", "coverage", "extra_ratio",
                       "accent", "accent_reason", "accent_delta", "rest_beats",
                       "density_ratio", "mode"}
