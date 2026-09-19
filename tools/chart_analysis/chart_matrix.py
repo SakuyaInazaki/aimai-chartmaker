@@ -823,6 +823,8 @@ def _cli(argv: list[str] | None = None) -> int:
     p.add_argument("--csv", default=None, help="每谱一行 CSV")
     p.add_argument("--json", default=None, help="分格 / 热图 / 趋势 / 共存 完整结果 JSON")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--detector", choices=("key", "hand"), default="key",
+                   help="key = 键位版 configs.py（默认）；hand = 手序版 configs_hand.py")
     p.add_argument("--min-cell", type=int, default=MIN_CELL_N)
     p.add_argument("--habitat-thresh", type=float, default=0.5)
     p.add_argument("--case", action="append", default=[],
@@ -834,7 +836,12 @@ def _cli(argv: list[str] | None = None) -> int:
     if a.limit:
         files = files[:a.limit]
     errs: list[str] = []
-    rows = build_rows(files, on_error=lambda cf, e: errs.append(f"{cf.name}: {e!r}"))
+    det = None
+    if a.detector == "hand":
+        from . import configs_hand as _ch
+        det = _ch.detect_all
+    rows = build_rows(files, detector=det,
+                      on_error=lambda cf, e: errs.append(f"{cf.name}: {e!r}"))
     for e in errs:
         print(f"[ERR] {e}", file=sys.stderr)
     if not a.quiet:
@@ -857,6 +864,7 @@ def _cli(argv: list[str] | None = None) -> int:
     if a.json:
         doc = {
             "n_charts": len(rows), "n_errors": len(errs), "errors": errs,
+            "detector": a.detector,
             "configs": all_configs(rows),
             "level_bands": [b[0] for b in LEVEL_BANDS],
             "bpm_bands": [b[0] for b in BPM_BANDS],

@@ -135,6 +135,16 @@ def default_detector(res: ParseResult, slots: Sequence | None = None):
     return _cfg.detect_all(res, slots)
 
 
+def hand_detector(res: ParseResult, slots: Sequence | None = None):
+    """**手序版**检测器 = `configs_hand.detect_all`（消费 `hands.assign` 的分手结果）。"""
+    from . import configs_hand as _ch
+    return _ch.detect_all(res, slots)
+
+
+#: CLI 的 ``--detector`` 取值
+DETECTORS: dict[str, Callable] = {"key": default_detector, "hand": hand_detector}
+
+
 def bar_config_table(res: ParseResult, slots: Sequence | None = None,
                      detector: Callable | None = None,
                      bar_configs: dict[int, set[str]] | None = None,
@@ -621,8 +631,11 @@ def _cli(argv: list[str] | None = None) -> int:
     p.add_argument("--json", default=None, help="完整结果 JSON 输出")
     p.add_argument("--csv", default=None, help="汇总 CSV 输出（每配置一行 + 矩阵长表）")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--detector", choices=sorted(DETECTORS), default="key",
+                   help="key = 键位版 configs.py（默认）；hand = 手序版 configs_hand.py")
     p.add_argument("--quiet", action="store_true")
     a = p.parse_args(argv)
+    det = DETECTORS[a.detector]
 
     files = corpus.discover(Path(a.chart_dir)) if a.chart_dir else corpus.discover()
     if a.limit:
@@ -633,7 +646,8 @@ def _cli(argv: list[str] | None = None) -> int:
         try:
             res = parse_chart(cf.read(), name=cf.name)
             profiles.extend(chart_profile(res, name=cf.name,
-                                          level=cf.internal_level or 0.0))
+                                          level=cf.internal_level or 0.0,
+                                          detector=det))
         except Exception as exc:                       # noqa: BLE001
             n_err += 1
             print(f"[ERR] {cf.name}: {exc!r}", file=sys.stderr)
@@ -642,6 +656,7 @@ def _cli(argv: list[str] | None = None) -> int:
     agg = aggregate_by_config(profiles)
     co = cooccurrence(profiles)
     result: dict = {"n_charts": len(files), "n_errors": n_err,
+                    "detector": a.detector,
                     "n_bars": len(profiles), "configs": agg,
                     "cooccurrence": {k: [list(x) for x in v] for k, v in co.items()}}
 
