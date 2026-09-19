@@ -5,12 +5,27 @@
 ---------------------
 "手"的规则一律以 `.agent/knowledge/` 为准：
 
+**v0.2（2026-09-19，用户讲授对齐）**：知识 064–067 与 019/030 的用户补充落地——
+舒适区模型取代分页二分、出张改按键位定义、撤销星头换手与末尾半边、纵连长度优先、
+段首按位置连续起手、侧边双押红线改成「突然 ∧ ¬引导」。逐项见 `docs/hand-sequencing.md` v0.2
+与 `docs/research/hand-alignment-user-2026-09-19.md`；v0.1 参数集保留在 :data:`PARAMS_LEGACY`。
+
 ======  ==========================================================
-006     分页处理（右手 1234 / 左手 5678）；正规手法：Tap/Touch 按 1 帧
-        (16.67 ms) 松手、Hold 按到尾 +1 帧、slide 星星头按 Tap、轨道匀速、
-        **启动拍上的 Tap（拍划）并入划动手法不另占手**、Wifi 视作双手
-007     划 slide 的手 = **slide 末尾所在半边**；四种换手定式；
-        一笔画 = 一手拍一手划
+064     **舒适区与出张**（用户）：左手 8765+1/4、右手 1234+8/5，共享区 {1,4,5,8}；
+        **右手落 6/7、左手落 2/3 = 出张**，轻易不要写、写了要做好引导
+065     **星星头与星星条可分属两手**（用户）：A 拍头可 A 划条也可 B 划条，
+        **没有严格规定**，无偏好 → 撤销 `w_star_switch`、`w_slide_end_side` 降为 tie-breaker
+066     **写谱不以特殊处理的手法为导向**（用户）：同时处理/狗刨是玩家解法不是谱师许可
+        → "一手吃两个对象"保持关闭
+067     **段首先出手 = 离上一段结束近的那只手**（用户）：段边界不重置两手状态
+006     分页处理（右手 1234 / 左手 5678，**已被 064 的舒适区模型取代**）；正规手法：
+        Tap/Touch 按 1 帧 (16.67 ms) 松手、Hold 按到尾 +1 帧、slide 星星头按 Tap、
+        轨道匀速、**启动拍上的 Tap（拍划）并入划动手法不另占手**、Wifi 视作双手
+007     划 slide 的手 = slide 末尾所在半边（**已被 065 降级为打分项/tie-breaker**）；
+        四种换手定式；一笔画 = 一手拍一手划
+019     纵连：**长度 ≤3 个 tap 即使稍快也可单手**（用户补充，长度优先于速度）
+030     连续双押：**禁止突然的**侧边双押（23/67）——突然 = 位移大 ∨ 间隔小，
+        引导 = 双押带过来 / 18·87·76·65·54 / 18·23·45·67（用户补充）
 008     无理五类（多押 / 内屏 / 叠键 / 外键 / 撞尾）与软/硬/绝对三级
 009     叠键红线：同判定区 < 2 帧 (33.3 ms) = 绝对无理
 010     外键：slide 启动后 200 ms 内同侧 Tap/Hold
@@ -74,6 +89,18 @@ FRAME = 1.0 / 60.0  # 知识 006：一帧 16.67 ms
 # ---------------------------------------------------------------------------
 
 PARAMS: dict = {
+    # ---- 手的可及模型（知识 064，用户 2026-09-19 讲授）----
+    # "comfort" = 舒适区模型（**当前口径**）：共享区 {1,4,5,8} 两手零代价；
+    #             **出张** = 左手落 {2,3} / 右手落 {6,7}，单档、代价显著。
+    # "page"    = v0.1 的分页二分 + 越界深度（知识 006/023），只在 PARAMS_LEGACY 里用。
+    "hand_model": "comfort",
+    "w_chuzhang": 0.90,             # 出张代价（**agent 设定**；用户只说"轻易不要写"）
+    # 共享区 {1,4,5,8} 上两手都是 0 代价（知识 064），于是"1 该谁打"在模型里成了**完全平局**，
+    # 解由束序偶然决定，还会给出两手交叉（左手 1 / 右手 8）这种物理上说不通的解。
+    # 故保留一个**极小的几何 tie-breaker**：落在知识 006 分页的对侧 +0.01。
+    # 量级只有 `w_move`(0.12) 的 1/12、`w_chuzhang` 的 1/90 —— 它只打破平局，
+    # **不表达 064 之外的任何偏好**（agent 操作化，v0.2 新增）。
+    "w_home_tiebreak": 0.01,
     # ---- 时间常数 ----
     "frame": FRAME,                 # 知识 006
     "simul_tol": 0.004,             # 视作"同刻"的时间容差（伪 each 相差 1 ms）
@@ -103,12 +130,39 @@ PARAMS: dict = {
     "speed_exponent": 0.5,          # 速度代价对"贴线程度"取凸函数（越贴线越陡）
     "w_same_hand": 0.20,            # 连续两个单点给同一只手（违反交替先验，知识 018）
     # 同键连打：手已经在那个键上，续敲比换手省事（知识 027 定拍）——给**负**代价；
-    # 知识 019 的"拆"由速度项负责（同键连打贴近单手上限时速度代价迅速上升）
-    "w_same_key_extra": -0.12,
-    "w_star_switch": 0.25,          # 星星头与轨道换手（一笔画偏好，知识 007）
-    "w_slide_end_side": 0.35,       # 划轨手不在 slide 末尾半边（知识 007）
+    # 知识 019 的"拆"由速度项负责（同键连打贴近单手上限时速度代价迅速上升）。
+    # **v0.2 重标定**：v0.1 取 −0.12，靠 `w_page` 把共享键钉在某只手上才守得住知识 027
+    # 的定拍；舒适区模型下 {1,4,5,8} 两手同价，−0.12 会让定拍段被拆成左右交替。
+    # 取 −0.22 使"舒适速度内同键续敲"净代价 −0.02（略优于换手），
+    # 贴近单手上限时优惠不给、回到知识 019 的"拆"。
+    "w_same_key_extra": -0.22,
+    # 知识 019 补充（用户 2026-09-19）：「理论上稍快且长度较小的纵连也可以单手处理
+    # （长度较小指的是 3 个 tap 或以内）」→ **长度优先于速度**：
+    # 同键连续 tap 串长度 ≤ `vertical_single_hand_max` 时允许单手——不加 `w_same_hand`、
+    # `w_same_key_extra` 全额给出、**免除速度项**（硬下界 t_hard_same 仍生效，知识 009）。
+    "vertical_length_first": True,
+    "vertical_single_hand_max": 3,
+    # 知识 067（用户 2026-09-19）：「先出手最好是离上一段结束的手，因为上一个配置把手
+    # 带到这里了」→ 段/配置片段的**首个任务**：① 不吃交替先验（隔了休止不存在"该换手了"）；
+    # ② 额外按位移计价，让**离得近的那只手**起手。二者都不是硬约束——
+    # `w_chuzhang`(0.90) 明显大于 `w_seg_start_far`(0.30)+`w_move`(0.12)，
+    # 所以"就近起手"若会造成出张，**避免出张优先**（重调清单 §4-6 的保守取法）。
+    "seg_gap_beats": 2.0,           # 距上一任务组 ≥ 这么多拍 = 新片段起手（agent 操作化）
+    "seg_gap_min_sec": 0.40,
+    "w_seg_start_far": 0.30,
+    "seg_reset_alternation": True,
+    # 知识 065（用户 2026-09-19）：「没有严格规定说拍星星头的手就一定能或者不能划星星条，
+    # 也就是 A 拍头可以 A 划条也可以 B 划条」→ **撤销**星头换手代价（置 0）。
+    "w_star_switch": 0.0,
+    # 同上：「末尾半边」（知识 007）失去用户侧依据 → 降为**极小 tie-breaker**，
+    # 只在两解代价几乎相等时打破平局（量级 ≤ 0.02，重调清单 §1 的保守取法）。
+    "w_slide_end_side": 0.02,
     "w_cross": 0.40,                # 两手同时越到对侧（拓扑/撞手风险）
-    "w_sweep_pair": 0.90,           # 一手扫掉同刻相邻两键（知识 036 的"扫"）
+    # 一手扫掉**同刻**相邻两键（知识 036 的"扫"）。**v0.2 上调 0.90 → 1.20**：
+    # 舒适区模型下 `2/3`、`6/7` 的两手解要付一次出张（0.90），旧值会让分配器改用
+    # "一只手扫掉整组"来绕开——那正是知识 066 禁止的"因为有手法所以可以塞难配置"。
+    # 取 1.20 > `w_chuzhang` + tie-breaker，使同刻扫只在两手解不可行时才被选中。
+    "w_sweep_pair": 1.20,
     "w_unassigned": 3.0,            # 无手可用（多押）
     # 一笔画续划（知识 007）：上一条轨道正好停在本条轨道的头键上，手不松开直接接着划
     "chain_tol": 0.020,
@@ -116,7 +170,15 @@ PARAMS: dict = {
     # 知识 017：星星头与启动拍之间的"错位音"**固定由划动的那只手自己拍**
     "w_misalign_other": 0.45,
     "misalign_ring": 1,             # 错位先验的作用半径（与星星头的环距）
+    #: 知识 017：这条轨道的等待期里有错位音时，拍头手 ≠ 划轨手的代价（v0.2 新增，见上）
+    "w_misalign_switch": 0.45,
     "allow_sweep_pair": True,
+    # 知识 066（用户 2026-09-19）：「同时处理 / 狗刨这两个词语是手法的意思，使用手法会
+    # 变得更好打，**不是说因为可以用这个手法就塞难打配置**……写谱也不是以特殊处理的手法
+    # 为导向这么写的」→ "一手吃两个对象"（042 狗刨 / 055 穿心同时处理 / 060② 同起点同时
+    # 处理）**保持关闭**，且理由从"实测前不得放宽 008/009"升级为**规划期口径**。
+    # `allow_sweep_pair` 只为知识 036 的"同刻相邻两键一次刷过"开口，不属于本条范围。
+    "one_hand_two_objects": False,
     "merge_multislide": True,       # 同头多 slide（`*`）视作一次连续划动（agent 推断，存疑）
     # ---- 无理阈值（知识 009/010/011） ----
     "muri_overlap_sec": 0.0333,
@@ -136,15 +198,69 @@ PARAMS: dict = {
     "hold_tail_win": 0.050,         # Hold 尾多押的判定窗口（知识 012）
     "path_brush": True,             # 轨道途经 A 区的"蹭键"检查（agent 推断，存疑）
     "path_brush_win": 0.060,        # 途经判定区的前后窗口（agent 推断）
+    # ---- 侧边双押红线（知识 030 的 2026-09-19 用户补充）----
+    # 用户原话把铁律读成「**禁止突然的**侧边双押」而不是「禁止侧边双押」：
+    #   突然 = ① 与谱面临近位置**位移较大** ∨ ② 与上一个配置**间隔过小**
+    #   引导 = A 双押带过来 / B 18·87·76·65·54（共享键环上步进） / C 18·23·45·67（相邻键对等距轮转）
+    #   红线 = 突然 ∧ ¬引导
+    "side_double_redline": True,
+    "side_guide_gap_beats": 1.0,    # 相邻两组双押算"连续"的间隔上限（拍；同 configs 口径）
+    # ① 位移阈值：`disp_cfg`（配置整体离"谱面临近位置"的最小环距）≥ 此值算"突然"。
+    #    388 官谱标定（验证报告 v0.2 §S）：无引导侧边双押 307 次，`disp_cfg` 分布
+    #    {1:221, 2:66, 3:20}，**从不到 4**；而 4 对侧边双押其实**结构上不可达**
+    #    （环上任一键到 {2,3} 两键的最小距离 ≤3）。即"官谱从不越过"与"≤1% 分位"
+    #    两条线都落在 4 上 → **位移这条腿在官谱上标不出有效线**，默认取 4（= 不触发）。
+    #    若用户要让它起作用，改 3 会在 388 官谱上标出 20 次（3.0%），逐条列在报告里。
+    "side_sudden_disp": 4,
+    "side_near_slots": 2,           # "谱面临近位置"取前面几个任务组（agent 操作化）
+    # ② 间隔阈值：距上一个任务组 ≤ 此值算"突然"。
+    #    388 官谱标定：无引导侧边双押的最小间隔 **142.9 ms**（= 210 BPM 的一个八分，
+    #    与知识 011 的容忍线同数），1% 分位 150 ms → 取 0.140 s 作"官谱从不越过"的线。
+    "side_sudden_gap_sec": 0.140,
+    "side_rotation_min_run": 3,     # C 型等距轮转所需的最短双押串长
     # ---- 搜索 ----
     "beam": 48,
     "force_first_hand": "",         # "L"/"R" 时强制首个任务的手（起手奇偶实验用）
 }
 
+#: **v0.1 旧口径**（提交 4942759 的参数集），保留供新旧对照用。
+#: 差别：分页二分 + 越界深度（006/023）、`w_star_switch` 与 `w_slide_end_side` 在位、
+#: 纵连按速度线拆手、段首不作特殊处理、无侧边双押红线。
+PARAMS_LEGACY: dict = dict(PARAMS)
+PARAMS_LEGACY.update({
+    "hand_model": "page",
+    "w_chuzhang": 0.0,
+    "w_home_tiebreak": 0.0,
+    "w_same_key_extra": -0.12,
+    "w_sweep_pair": 0.90,
+    "w_misalign_switch": 0.0,
+    "w_page": 0.30,
+    "w_star_switch": 0.25,
+    "w_slide_end_side": 0.35,
+    "vertical_length_first": False,
+    "w_seg_start_far": 0.0,
+    "seg_reset_alternation": False,
+    "side_double_redline": False,
+})
+
 _RIGHT_HOME = frozenset({1, 2, 3, 4})   # 知识 006：右手分页
 _LEFT_HOME = frozenset({5, 6, 7, 8})
 #: 知识 023：右手最多够到 5、左手最多够到 4（深度 ≤1 为可及，=2 为越界）
 HOME: dict[str, frozenset[int]] = {"R": _RIGHT_HOME, "L": _LEFT_HOME}
+
+#: **知识 064（用户 2026-09-19 讲授）的舒适区**——原话：
+#: 「左手最好处理左半屏（8765）以及向右方延伸的上方 1 和下方 4、右手最好处理右半屏
+#: （1234）以及 85，如果写出来涉及到右手需要拍 6 或者 7，左手拍 2 或者 3
+#: 那你就要好好考虑难度了。」
+COMFORT: dict[str, frozenset[int]] = {
+    "L": frozenset({8, 7, 6, 5, 1, 4}),
+    "R": frozenset({1, 2, 3, 4, 8, 5}),
+}
+#: 两手都"最好处理"的共享区（知识 064）——**两手落这里都零代价**
+SHARED_KEYS = frozenset({1, 4, 5, 8})
+#: 出张的四个「手 × 键」组合（知识 064）：右手落 6/7、左手落 2/3
+CHUZHANG_KEYS: dict[str, frozenset[int]] = {"L": frozenset({2, 3}),
+                                            "R": frozenset({6, 7})}
 
 _TASK_KINDS = ("tap", "hold", "star", "slide", "wifi", "touch", "touch_hold")
 
@@ -183,6 +299,33 @@ def page_depth(hand: str, key: int | None) -> int:
     if k in HOME[hand]:
         return 0
     return min(cdist(k, h) for h in HOME[hand])
+
+
+def is_chuzhang(hand: str, key: int | None) -> bool:
+    """**出张**（知识 064，用户口径）：右手落 6/7，或左手落 2/3。
+
+    只有这四个「手 × 键」组合算出张；共享区 ``{1,4,5,8}`` 两手都不算。
+    出张**不是无理**（用户给的是"要好好考虑难度 / 做好引导"），属于风格预算。
+    """
+    if key is None or hand not in ("L", "R"):
+        return False
+    return int(key) in CHUZHANG_KEYS[hand]
+
+
+def reach_cost(hand: str, key: int | None, p: dict) -> float:
+    """一只手落在某键的**可及性代价**。
+
+    ``hand_model == "comfort"``（当前口径，知识 064）：出张 → ``w_chuzhang``，其余 0。
+    ``hand_model == "page"``（v0.1 旧口径，知识 006/023）：``w_page × 越界深度``。
+    """
+    if p.get("hand_model", "comfort") == "page":
+        return p["w_page"] * page_depth(hand, key)
+    if key is None:
+        return 0.0
+    c = p["w_chuzhang"] if is_chuzhang(hand, key) else 0.0
+    if home_side(key) != hand:
+        c += p["w_home_tiebreak"]
+    return c
 
 
 def _other(hand: str) -> str:
@@ -265,6 +408,11 @@ class HandTask:
     merged_stars: tuple[int, ...] = ()  # 并入本任务的拍划**星星头**（note 下标）
     feeds: tuple[int, ...] = ()        # 本任务顺带打下的星星头所属的轨道任务下标
     wait_of: tuple[int, ...] = ()      # 落在哪些 slide 的"启动拍等待期"里（错位窗口）
+    misalign_taps: tuple[int, ...] = ()  # （轨道任务用）落在本条轨道错位窗口里的任务
+    #: 本任务所在的**同键连续 tap 串**长度（知识 019 用户补充：≤3 可单手）；
+    #: 非 tap 或不在串里时 = 1。只统计 ``tap``——用户原话说的就是"3 个 tap 或以内"，
+    #: 混入 hold / 星星头的情形原话未涉及（知识 019 补充里记的待确认项 2）。
+    vrun_len: int = 1
     t_end_nominal: float = 0.0         # 引导星按匀速到达终点的名义时刻
     t_end_max: float = 0.0             # 最晚放手时刻（名义尾 + 知识 048 容错）
     is_break: bool = False
@@ -326,8 +474,12 @@ class BarHand:
     n_right: int = 0
     alt_rate: float = 0.0          # 交替率：相邻任务换手的比例
     max_same_run: int = 0          # 同手最长连打
-    cross_count: int = 0           # 跨半圈（落在对侧分页）的任务数
-    chuzhang: int = 0              # 出张：划轨手不在 slide 末尾半边的根数（知识 007/043）
+    cross_count: int = 0           # 跨半圈（落在对侧分页）的任务数（v0.1 旧口径诊断量）
+    #: **出张**（知识 064 用户口径）：右手落 6/7 或左手落 2/3 的**落点数**
+    chuzhang: int = 0
+    n_slides: int = 0              # 本小节的 slide/wifi 轨道任务数
+    chuzhang_slide: int = 0        # 其中头键或尾键落进出张区的根数（知识 064）
+    chuzhang_end_side: int = 0     # **v0.1 旧口径**：划轨手不在 slide 末尾半边的根数（007，已作废）
     max_speed_l: float = 0.0       # 左手最大等效速度（键/秒）
     max_speed_r: float = 0.0
     conflicts: int = 0             # 占用冲突 / 无手可用
@@ -342,6 +494,9 @@ class BarHand:
                 "alt_rate": round(self.alt_rate, 4),
                 "max_same_run": self.max_same_run,
                 "cross_count": self.cross_count, "chuzhang": self.chuzhang,
+                "n_slides": self.n_slides,
+                "chuzhang_slide": self.chuzhang_slide,
+                "chuzhang_end_side": self.chuzhang_end_side,
                 "max_speed_l": round(self.max_speed_l, 3),
                 "max_speed_r": round(self.max_speed_r, 3),
                 "conflicts": self.conflicts, "muri": dict(self.muri),
@@ -363,6 +518,9 @@ class HandAssignment:
     #: 因此与 :attr:`muri` 分开：软级的撞尾/外键/路径蹭键归这里，硬/绝对仍算无理。
     scrape: list[HandMuri] = field(default_factory=list)
     infeasible: list[HandMuri] = field(default_factory=list)
+    #: 全谱侧边双押事件（知识 030 用户补充的「突然 / 引导 / 红线」三判），
+    #: 见 :func:`side_double_events`
+    side_doubles: list[dict] = field(default_factory=list)
     total_cost: float = 0.0
     n_tasks: int = 0
     params: dict = field(default_factory=dict)
@@ -635,6 +793,23 @@ def build_tasks(res: ParseResult | Sequence[NoteEvent],
         if ti >= 0:
             n2t.setdefault(j, ti)
 
+    # 同键连续 tap 串的长度（知识 019 的 2026-09-19 用户补充：长度优先于速度）。
+    # "连续"= 在任务时间序里**紧挨着**且键位相同的一段 tap（中间夹了别的键就断开）。
+    i = 0
+    while i < len(kept):
+        if kept[i].kind != "tap" or kept[i].key is None:
+            i += 1
+            continue
+        j = i
+        while (j + 1 < len(kept) and kept[j + 1].kind == "tap"
+               and kept[j + 1].key == kept[i].key
+               and kept[j + 1].t > kept[j].t + 1e-9):
+            j += 1
+        ln = j - i + 1
+        for k in range(i, j + 1):
+            kept[k].vrun_len = ln
+        i = j + 1
+
     # 错位窗口（知识 017）：标注每个任务落在哪些 slide 的"星星头 → 启动拍"等待期里
     tracks = [t for t in kept if t.kind in ("slide", "wifi")]
     for t in kept:
@@ -649,6 +824,13 @@ def build_tasks(res: ParseResult | Sequence[NoteEvent],
                     and cdist(t.key, tr.key) <= p["misalign_ring"]):
                 acc.append(tr.index)
         t.wait_of = tuple(acc)
+    # 反向索引：每条轨道的错位窗口里有哪些任务（知识 017 的"错位音"）
+    back: dict[int, list[int]] = {}
+    for t in kept:
+        for w in t.wait_of:
+            back.setdefault(w, []).append(t.index)
+    for tr in tracks:
+        tr.misalign_taps = tuple(back.get(tr.index, ()))
     return kept, notes, n2t
 
 
@@ -699,17 +881,34 @@ class _Node:
 
 
 def _hit_cost(hand: str, st: _HState, key: int | None, t: float,
-              p: dict) -> tuple[float, list[tuple[str, str, str]]]:
-    """一只手从状态 ``st`` 去 ``key`` 在 ``t`` 出手的代价；返回 (cost, marks) 或 (inf, ...)。"""
+              p: dict, seg_start: bool = False,
+              vrun_single: bool = False) -> tuple[float, list[tuple[str, str, str]]]:
+    """一只手从状态 ``st`` 去 ``key`` 在 ``t`` 出手的代价；返回 (cost, marks) 或 (inf, ...)。
+
+    ``seg_start``：本任务是新段/新配置片段的首个任务（知识 067）——额外按位移计价，
+    让"离上一段结束近的那只手"起手。
+    ``vrun_single``：本任务属于**长度 ≤3 的同键 tap 串**（知识 019 用户补充）——
+    免除速度项（硬下界仍生效），长度优先于速度。
+    """
     marks: list[tuple[str, str, str]] = []
-    cost = p["w_page"] * page_depth(hand, key)
+    cost = reach_cost(hand, key, p)
     if st.key is None:
         return cost, marks
     if key is None:
         return cost, marks
     d = cdist(st.key, key)
     cost += p["w_move"] * d / 4.0
+    if seg_start:
+        # 知识 067：段首先出手 = 离上一段结束位置近的那只手
+        cost += p["w_seg_start_far"] * d / 4.0
     dt = t - st.ready
+    if vrun_single and d == 0:
+        # 知识 019 用户补充：「稍快且长度较小的纵连也可以单手处理（3 个 tap 或以内）」
+        # —— 长度优先于速度；只有知识 009 的叠键红线（33.3 ms）仍是硬下界
+        if dt <= p["t_hard_same"]:
+            return math.inf, [("超速", "绝对", f"{hand} 手同键连打仅 {dt * 1000:.1f} ms "
+                                              f"< 叠键红线 {p['t_hard_same'] * 1000:.1f} ms")]
+        return cost, marks
     treq = t_required(d, p)
     thard = t_hard_limit(d, p)
     if d == 1 and dt < treq and dt >= p["t_sweep_req"]:
@@ -747,30 +946,41 @@ def _apply_one(node: _Node, hand: str, task: HandTask, p: dict,
         return math.inf, st, [("占用冲突", "绝对",
                                f"{hand} 手被占到 {avail:.3f}s，"
                                f"但 {task.t:.3f}s 又来 {task.kind}")]
+    seg_start = _is_seg_start(node, task, p)
+    vrun_single = bool(p["vertical_length_first"]
+                       and 2 <= task.vrun_len <= p["vertical_single_hand_max"])
     if chain:
-        cost, m = (p["w_page"] * page_depth(hand, task.key)
-                   + p["w_chain_bonus"]), []
+        cost, m = reach_cost(hand, task.key, p) + p["w_chain_bonus"], []
     else:
-        cost, m = _hit_cost(hand, st, task.key, task.t, p)
+        cost, m = _hit_cost(hand, st, task.key, task.t, p, seg_start, vrun_single)
     marks.extend(m)
     if cost == math.inf:
         return math.inf, st, marks
 
     if task.kind in ("slide", "wifi"):
-        # 划轨手要把整条轨道走完，分页代价按"头 + 尾"的平均深度算
-        # （_hit_cost 里只按头键算了一次，这里补上尾键的一半差额）
+        # 划轨手要把整条轨道走完，可及性代价按"头 + 尾"的平均算
+        # （_hit_cost 里只按头键算了一次，这里补上尾键的一半差额）。
+        # 知识 064 + 065：这一项**只表达"轨道尾落不落在这只手的舒适区"这层可及性成本**，
+        # 不再表达"尾在哪边就该谁划"（那是 007 的末尾半边，已被 065 降级）。
         if task.end_key is not None:
-            d_head = page_depth(hand, task.key)
-            d_end = page_depth(hand, task.end_key)
-            cost += p["w_page"] * (d_end - d_head) / 2.0
-        # 知识 007 的"末尾半边"与"星头不换手"只约束**一笔起手**；
-        # 续划中的手已经在轨道上（一笔画"开始后不停"），不再受这两条约束
+            cost += (reach_cost(hand, task.end_key, p)
+                     - reach_cost(hand, task.key, p)) / 2.0
+        # 知识 065（用户）：星星头与星星条**可分属两手，没有严格规定** →
+        # `w_star_switch` 已置 0；`w_slide_end_side` 只剩极小 tie-breaker。
         if not chain:
             if task.end_key is not None and home_side(task.end_key) != hand:
                 cost += p["w_slide_end_side"]
             sh = pending.get(task.index)
             if sh is not None and sh != hand:
                 cost += p["w_star_switch"]
+                # 知识 017（用户原文）：「错位音**固定由滑动的那只手自己拍**——
+                # 头 → 错位音 → 启动拍 → 划轨」。知识 065 撤销的是"头与条同手"的
+                # **普遍**偏好，**不是 017 这一条配置定义**：一旦这条轨道的启动拍
+                # 等待期里真的有错位音，头 / 错位音 / 轨道就该是同一只手。
+                # 不加这一项，w_star_switch=0 后模型会把"头+错位音"给 A、轨道给 B，
+                # 绕开 `w_misalign_other` 而实际并不满足 017。
+                if task.misalign_taps:
+                    cost += p["w_misalign_switch"]
         end_key = task.end_key if task.end_key is not None else task.key
         new = _HState(end_key, task.t_end, p["slide_release_slack"])
     else:
@@ -784,14 +994,40 @@ def _apply_one(node: _Node, hand: str, task: HandTask, p: dict,
             cost += p["w_misalign_other"]
 
     # 交替先验（知识 018）：上一个单手任务也是这只手
+    same_key = (st.key is not None and task.key is not None and st.key == task.key)
     if node.last_hand == hand and node.last_t < task.t - 1e-9:
-        cost += p["w_same_hand"]
-        # 同键续敲的优惠只在**舒适速度内**给（知识 027 定拍）；
-        # 一旦贴近单手上限就是知识 019 的"拆"，不再优惠
-        if (st.key is not None and task.key is not None and st.key == task.key
-                and task.t - st.ready >= t_required(0, p) - 1e-9):
+        if vrun_single and same_key:
+            # 知识 019 用户补充：≤3 个 tap 的短纵连"其实没什么要求"，单手是合法解 →
+            # 不加交替代价，同键续敲的优惠**全额**给出（不再要求落在舒适速度内）
             cost += p["w_same_key_extra"]
+        elif seg_start and p["seg_reset_alternation"]:
+            # 知识 067：隔了一个休止的新片段，不存在"上一音该换手了"这回事
+            pass
+        else:
+            cost += p["w_same_hand"]
+            # 同键续敲的优惠只在**舒适速度内**给（知识 027 定拍）；
+            # 一旦贴近单手上限就是知识 019 的"拆"，不再优惠
+            if same_key and task.t - st.ready >= t_required(0, p) - 1e-9:
+                cost += p["w_same_key_extra"]
     return cost, new, marks
+
+
+def _is_seg_start(node: _Node, task: HandTask, p: dict) -> bool:
+    """本任务是否为一个新段 / 新配置片段的首个任务（知识 067 的作用点）。
+
+    判据（**agent 操作化**，用户未给量化）：距上一个任务组 ≥ ``seg_gap_beats`` 拍
+    （下界 ``seg_gap_min_sec``）。用户原话讲的是"上一个配置把手带到这里"，
+    因此只要**中间有一段空档**就按"新配置起手"处理。
+    """
+    if p["w_seg_start_far"] <= 0 and not p["seg_reset_alternation"]:
+        return False
+    gap = task.t - node.last_t
+    if gap <= 0:
+        return False
+    thr = p["seg_gap_min_sec"]
+    if task.bpm:
+        thr = max(thr, p["seg_gap_beats"] * 60.0 / task.bpm)
+    return gap >= thr
 
 
 def _enumerate_vectors(tasks: Sequence[HandTask], p: dict) -> list[tuple]:
@@ -858,9 +1094,10 @@ def _apply_vector(node: _Node, tasks: Sequence[HandTask], vec: tuple,
                        and int(st.key) == int(task.key)
                        and abs(task.t - st.ready) <= p["chain_tol"])
             if chained:
-                cc.append(p["w_page"] * page_depth(hand, task.key))
+                cc.append(reach_cost(hand, task.key, p))
             else:
-                c, _ = _hit_cost(hand, st, task.key, task.t, p)
+                c, _ = _hit_cost(hand, st, task.key, task.t, p,
+                                 _is_seg_start(node, task, p))
                 cc.append(c)
         if any(c == math.inf for c in cc):
             return None
@@ -891,10 +1128,12 @@ def _apply_vector(node: _Node, tasks: Sequence[HandTask], vec: tuple,
         if st.key is not None:
             pair.sort(key=lambda t: cdist(st.key, t.key or 0))
         # 只对"先碰到的那个键"计移动代价；第二个键由扫的动作顺带吃掉
-        c, mk = _hit_cost(hand, st, pair[0].key, pair[0].t, p)
+        c, mk = _hit_cost(hand, st, pair[0].key, pair[0].t, p,
+                          _is_seg_start(node, pair[0], p))
         if c == math.inf:
             return None
-        cost += c + p["w_sweep_pair"]
+        # 两个键都要落进这只手（知识 064：出张按落点算），第二个键补一次可及性代价
+        cost += c + p["w_sweep_pair"] + reach_cost(hand, pair[-1].key, p)
         for kind, level, detail in mk:
             marks.append((kind, level, pair[0].index, detail))
         end_st = _HState(pair[-1].key, max(t.t_end for t in pair))
@@ -1064,6 +1303,7 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
         out.muri.append(hm)
         if level == "绝对" and kind in ("多押", "占用冲突", "超速"):
             out.infeasible.append(hm)
+    out.side_doubles = side_double_events(tasks, out.task_hand, p)
     out.muri.extend(detect_hand_muri(notes, tasks, out.task_hand, p))
     out.muri.sort(key=lambda m: m.time)
     # 无理 vs 蹭的压力（知识 048：软级的蹭多为手法/设计手段，不是无理）
@@ -1077,6 +1317,156 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
 # ---------------------------------------------------------------------------
 # 4. 无理检测（手感知版；知识 008–011）
 # ---------------------------------------------------------------------------
+
+
+_SIDE_DOUBLE_SETS = (frozenset({2, 3}), frozenset({6, 7}))
+_HIT_KINDS = ("tap", "hold", "star")
+
+
+def _pair_anchor(keys: frozenset[int]) -> int | None:
+    """相邻键对 ``{k, k+1}`` 的锚（逆时针在前的那个键）；非相邻对返回 None。"""
+    if len(keys) != 2:
+        return None
+    a, b = sorted(keys)
+    if b - a == 1:
+        return a
+    if a == 1 and b == 8:
+        return 8
+    return None
+
+
+def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
+                       p: dict) -> list[dict]:
+    """列出全谱的**侧边双押**（``{2,3}`` / ``{6,7}``）并判「突然」与「引导」。
+
+    知识 030 的 2026-09-19 用户补充把铁律读成「**禁止突然的**侧边双押」：
+
+    - **突然** = ① 与谱面临近位置**位移较大** ∨ ② 与上一个配置**间隔过小**；
+    - **引导** = A「双押带过来」/ B ``18·87·76·65·54``/ C ``18·23·45·67``；
+    - **红线** = 突然 ∧ ¬引导。
+
+    本函数把 A/B 合并成「**与前一组双押共享键**」（主会话解读：前面的连续双押靠共享键
+    步进把手带到侧边，A 与 B 同型），C 实现成「**整串都是相邻键对且锚等距轮转**」。
+    两个「突然」阈值（``side_sudden_disp`` / ``side_sudden_gap_sec``）是
+    **agent 操作化**，取值由 388 官谱标定（见验证报告 v0.2 一节）。
+    """
+    tol = p["simul_tol"]
+    # 1) 同刻双手对（只看击打：tap / hold / 星星头）
+    slots: dict[int, dict[str, HandTask]] = {}
+    for t, h in zip(tasks, task_hand):
+        if h in ("L", "R") and t.key is not None and t.kind in _HIT_KINDS:
+            slots.setdefault(int(round(t.t / tol)), {})[h] = t
+    pair_slots = [(sorted(d.values(), key=lambda x: x.t)[0].t, d)
+                  for _, d in sorted(slots.items()) if "L" in d and "R" in d]
+    if not pair_slots:
+        return []
+    pairs = [(t, frozenset({d["L"].key, d["R"].key}), d) for t, d in pair_slots]
+
+    # 2) 切成"连续双押串"（相邻两组间隔 ≤ side_guide_gap_beats 拍）
+    runs: list[list[int]] = []
+    for i, (t, _ks, d) in enumerate(pairs):
+        bpm = d["L"].bpm or d["R"].bpm or 0.0
+        lim = p["side_guide_gap_beats"] * 60.0 / bpm if bpm else 0.5
+        if runs and 0 < t - pairs[runs[-1][-1]][0] <= lim + 1e-6:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    run_of = {i: (ri, pos) for ri, r in enumerate(runs) for pos, i in enumerate(r)}
+
+    # 3) C 型：整串都是相邻键对、锚沿环等距轮转
+    rotation_run: set[int] = set()
+    for r in runs:
+        if len(r) < p["side_rotation_min_run"]:
+            continue
+        anchors = [_pair_anchor(pairs[i][1]) for i in r]
+        if any(a is None for a in anchors):
+            continue
+        steps = [cstep(anchors[k], anchors[k + 1]) for k in range(len(anchors) - 1)]
+        if steps and all(s == steps[0] and s != 0 for s in steps):
+            rotation_run.update(r[1:])   # 串首没有"前面的引导"，不算
+
+    # 4) 每只手的上一个落键 / 上一个任务组时刻
+    t_sorted = sorted(range(len(tasks)), key=lambda i: tasks[i].t)
+    prev_key: dict[str, int | None] = {"L": None, "R": None}
+    snap: dict[int, tuple] = {}
+    prev_t = -1e9       # 上一个**不同刻**任务组的时刻（同刻的不算"上一个配置"）
+    cur_t = -1e9
+    pend: list[tuple[str, int]] = []
+    pend_keys: list[int] = []
+    near: list[list[int]] = []      # 最近 side_near_slots 个任务组的键（"谱面临近位置"）
+    win = max(1, int(p.get("side_near_slots", 2)))
+    for i in t_sorted:
+        t, h = tasks[i], task_hand[i]
+        if t.t > cur_t + tol:
+            prev_t, cur_t = cur_t, t.t
+            for hh, k in pend:
+                prev_key[hh] = k
+            if pend_keys:
+                near.append(pend_keys)
+                near[:] = near[-win:]
+            pend, pend_keys = [], []
+        snap[i] = (prev_key["L"], prev_key["R"], prev_t,
+                   frozenset(k for g in near for k in g))
+        for hh in (("L", "R") if h == "LR" else ([h] if h in ("L", "R") else [])):
+            if t.key is not None:
+                pend.append((hh, int(t.key)))
+        if t.key is not None:
+            pend_keys.append(int(t.key))
+
+    out: list[dict] = []
+    for i, (t, ks, d) in enumerate(pairs):
+        if ks not in _SIDE_DOUBLE_SETS:
+            continue
+        ri, pos = run_of[i]
+        prev_shared = False
+        if pos > 0:
+            prev_ks = pairs[runs[ri][pos - 1]][1]
+            prev_shared = bool(prev_ks & ks)
+        guided_c = i in rotation_run
+        guided = prev_shared or guided_c
+        guide_type_set = "A/B" if prev_shared else "C" if guided_c else ""
+        # 「突然」①：与谱面临近位置的位移
+        li, ri_ = d["L"].index, d["R"].index
+        pl, pr, pt, nk = snap.get(li, (None, None, -1e9, frozenset()))
+        pl2, pr2, pt2, nk2 = snap.get(ri_, (None, None, -1e9, frozenset()))
+        pt = max(pt, pt2)
+        pl = pl if pl is not None else pl2
+        pr = pr if pr is not None else pr2
+        nk = nk | nk2
+        dl = cdist(pl, d["L"].key) if pl is not None else 4
+        dr = cdist(pr, d["R"].key) if pr is not None else 4
+        # `disp` = 两只手各自要飞多远（取大者）——侧边双押必有一手出张，这一项是
+        #   **结构性**的，388 官谱上不构成区分（见验证报告 v0.2 的标定）；
+        # `disp_cfg` = **配置整体**离"谱面临近位置"多远（与谁打无关）——
+        #   = 临近 `side_near_slots` 个任务组的键到本组两键的最小环距，
+        #   这才是用户原话"与谱面临近位置位移较大"的直读。
+        disp = max(dl, dr)
+        # 谱面开头（前面什么都没有）不存在"突然出现"——玩家有整段时间看这一组，
+        # 记 0 并在下面被 D 型吸收（agent 操作化）。
+        disp_cfg = (min(cdist(k, m) for k in ks for m in nk) if nk else 0)
+        gap = t - pt if pt > -1e8 else 1e9
+        # D 型引导：**临近位置已经落在这两个键上**（`disp_cfg == 0`）——手本来就在那儿。
+        # 依据是知识 030「类型与实例」表里原有的「**单点铺垫 → 双押串**」一型（+♂ 谱例），
+        # 是用户 A 型「双押带过来」的单点版；**agent 操作化**，用户原话未直接列这一型。
+        guided_d = disp_cfg == 0
+        guided = guided or guided_d
+        if guided_d and not guide_type_set:
+            guide_type_set = "D"
+        sudden_disp = disp_cfg >= p["side_sudden_disp"]
+        sudden_gap = gap <= p["side_sudden_gap_sec"]
+        sudden = sudden_disp or sudden_gap
+        out.append({
+            "measure": d["L"].measure, "time": t,
+            "keys": sorted(ks), "L": d["L"].key, "R": d["R"].key,
+            "disp": disp, "disp_l": dl, "disp_r": dr, "disp_cfg": disp_cfg,
+            "gap": round(gap, 4) if gap < 1e8 else None,
+            "run_len": len(runs[ri]), "pos_in_run": pos,
+            "guided": guided, "guide_type": guide_type_set,
+            "sudden": sudden,
+            "sudden_kind": ("位移" if sudden_disp else "") + ("间隔" if sudden_gap else ""),
+            "redline": bool(sudden and not guided),
+        })
+    return out
 
 
 def detect_hand_muri(notes: Sequence[NoteEvent], tasks: Sequence[HandTask],
@@ -1227,6 +1617,17 @@ def detect_hand_muri(notes: Sequence[NoteEvent], tasks: Sequence[HandTask],
         if dep >= 3:
             out.append(HandMuri("换手拧巴", "软", d["L"].measure, d["L"].t,
                                 f"左手在 {lk}、右手在 {rk}（交叉深度 {dep}）"))
+
+    # 突然的侧边双押（知识 030 铁律 + 用户 2026-09-19 的"突然/引导"定义）
+    if p["side_double_redline"]:
+        for ev in side_double_events(tasks, task_hand, p):
+            if not ev["redline"]:
+                continue
+            gs = f"{ev['gap'] * 1000:.0f} ms" if ev["gap"] is not None else "—"
+            out.append(HandMuri(
+                "突然侧边双押", "硬", ev["measure"], ev["time"],
+                f"{ev['keys'][0]}/{ev['keys'][1]}：距临近位置 {ev['disp_cfg']} 格、"
+                f"距上一配置 {gs}（{ev['sudden_kind']}突然），且无引导"))
     return out
 
 
@@ -1261,10 +1662,17 @@ def bar_metrics(tasks: Sequence[HandTask], task_hand: Sequence[str],
                 b.n_right += 1
             if page_depth(hh, t.key) >= 1:
                 b.cross_count += 1
-            # 出张（知识 007/043）：划轨手不在 slide 末尾所在半边
-            if (t.kind in ("slide", "wifi") and t.end_key is not None
-                    and home_side(t.end_key) != hh):
+            # ★ 出张（知识 064 用户口径）：**右手落 6/7 或左手落 2/3**，只有这四个组合。
+            #   旧口径（"划轨手不在 slide 末尾半边"，知识 007）已被 064/065 作废，
+            #   仍并列输出在 `chuzhang_end_side` 里供新旧对照。
+            if is_chuzhang(hh, t.key):
                 b.chuzhang += 1
+            if t.kind in ("slide", "wifi"):
+                b.n_slides += 1
+                if is_chuzhang(hh, t.key) or is_chuzhang(hh, t.end_key):
+                    b.chuzhang_slide += 1
+                if t.end_key is not None and home_side(t.end_key) != hh:
+                    b.chuzhang_end_side += 1
             pv = prev.get(hh)
             if pv is not None and pv.key is not None and t.key is not None:
                 dt = t.t - pv.t_end
@@ -1338,9 +1746,18 @@ def chart_summary(ha: HandAssignment) -> dict:
                             / max(1, sum(b.n_tasks for b in bars)), 4),
         "max_speed": round(max((max(b.max_speed_l, b.max_speed_r) for b in bars),
                                default=0.0), 3),
+        # ★ 出张（知识 064 用户口径）：右手落 6/7 / 左手落 2/3 的落点数
         "chuzhang": sum(b.chuzhang for b in bars),
+        "chuzhang_per_1k": round(1000 * sum(b.chuzhang for b in bars)
+                                 / max(1, ha.n_tasks), 3),
+        "chuzhang_slide": sum(b.chuzhang_slide for b in bars),
         "chuzhang_per_slide": round(
-            sum(b.chuzhang for b in bars)
+            sum(b.chuzhang_slide for b in bars)
+            / max(1, sum(1 for t in ha.tasks if t.kind in ("slide", "wifi"))), 4),
+        # v0.1 旧口径（划轨手不在 slide 末尾半边，知识 007；已被 064/065 作废）
+        "chuzhang_end_side": sum(b.chuzhang_end_side for b in bars),
+        "chuzhang_end_side_per_slide": round(
+            sum(b.chuzhang_end_side for b in bars)
             / max(1, sum(1 for t in ha.tasks if t.kind in ("slide", "wifi"))), 4),
         "scrape_pressure": len(ha.scrape),
         "scrape_per_1k": round(1000 * len(ha.scrape) / max(1, ha.n_tasks), 3),

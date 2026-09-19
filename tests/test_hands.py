@@ -68,6 +68,143 @@ def test_越界深度_知识023():
 
 
 # ---------------------------------------------------------------------------
+# 舒适区与出张（知识 064，用户 2026-09-19 讲授）
+# ---------------------------------------------------------------------------
+
+
+def test_舒适区共享键两手都不算出张_知识064():
+    # 用户原话：左手 8765 + 上方 1 与下方 4；右手 1234 + 8 和 5
+    for k in (1, 4, 5, 8):
+        assert not hd.is_chuzhang("L", k), k
+        assert not hd.is_chuzhang("R", k), k
+    assert hd.SHARED_KEYS == {1, 4, 5, 8}
+
+
+def test_出张只有四个手键组合_知识064():
+    # 只有右手拍 6/7、左手拍 2/3 才算出张
+    assert hd.is_chuzhang("R", 6) and hd.is_chuzhang("R", 7)
+    assert hd.is_chuzhang("L", 2) and hd.is_chuzhang("L", 3)
+    assert not hd.is_chuzhang("L", 6) and not hd.is_chuzhang("L", 7)
+    assert not hd.is_chuzhang("R", 2) and not hd.is_chuzhang("R", 3)
+
+
+def test_右手打5和8不再算越界_知识064_负例():
+    # v0.1 的分页模型把这两个键记成"越界深度 1"；064 明说它们属右手舒适区
+    p = dict(hd.PARAMS)
+    assert hd.reach_cost("R", 5, p) < 0.05 and hd.reach_cost("R", 8, p) < 0.05
+    assert hd.reach_cost("L", 1, p) < 0.05 and hd.reach_cost("L", 4, p) < 0.05
+    assert hd.reach_cost("R", 6, p) >= p["w_chuzhang"]
+
+
+def test_出张计数按064口径_正例():
+    # 左手被 Hold 钉在 7、右手被 2 占住 → 只能各出张一次
+    ha = _assign("(120){8}7h[2:1]/2,6,6,6,6,E")
+    assert sum(b.chuzhang for b in ha.bars) == 2
+
+
+def test_出张计数按064口径_负例_共享键不计():
+    # 同一形态，但另一只手落在共享键 5/8 上 → 出张 0（v0.1 的"跨半圈"会记成 4 次）
+    ha = _assign("(120){8}7h[2:1]/2,5,8,5,8,E")
+    assert sum(b.chuzhang for b in ha.bars) == 0
+    assert sum(b.cross_count for b in ha.bars) > 0     # 旧口径的跨半圈仍在，只是不叫出张
+
+
+# ---------------------------------------------------------------------------
+# 纵连：长度优先于速度（知识 019 的 2026-09-19 用户补充）
+# ---------------------------------------------------------------------------
+
+
+def test_短纵连三个tap可单手_知识019补充():
+    # 185BPM {16} ≈ 81 ms/音，已过单手舒适线 83.3 ms；但长度 ≤3 → 允许单手
+    assert _hands("(185){16}1,1,1,,,,,,E") in ("1R 1R 1R", "1L 1L 1L")
+
+
+def test_长纵连仍按速度拆手_知识019():
+    # 同样 81 ms/音，长度 8 > 3 → 回到"拆"
+    out = _hands("(185){16}1,1,1,1,1,1,1,1,E")
+    assert out.count("1R") == 4 and out.count("1L") == 4
+
+
+def test_短纵连也不得越过叠键红线_知识009():
+    # 33.3 ms 的硬下界对短纵连同样生效（用户只说"稍快"，没说可以越过 009）
+    ha = _assign("(300){32}1,1,1,,,,,,E")
+    assert any(m.kind in ("叠键", "超速") for m in ha.muri) or ha.infeasible
+
+
+# ---------------------------------------------------------------------------
+# 段首起手 = 位置连续（知识 067）
+# ---------------------------------------------------------------------------
+
+
+def test_段首起手给离得近的手_知识067():
+    # 休止之后新片段起在 8：左手停在 1（环距 1），右手停在 5（环距 3）→ 左手起手
+    out = _hands("(120){4}8/4,1/5,,,,,,,8,,,,E")
+    assert out.endswith("8L")
+
+
+def test_就近起手若造成出张则避开_知识067与064():
+    # 同一起点状态，新片段起在 2：左手虽然更近（1→2），但左手拍 2 是出张 → 右手起手
+    out = _hands("(120){4}8/4,1/5,,,,,,,2,,,,E")
+    assert out.endswith("2R")
+
+
+# ---------------------------------------------------------------------------
+# 侧边双押：突然 ∧ ¬引导（知识 030 的 2026-09-19 用户补充）
+# ---------------------------------------------------------------------------
+
+
+def test_侧边双押_突然且无引导判红线_知识030():
+    ha = _assign("(220){8}8,1,4,2/3,E")
+    ev = ha.side_doubles
+    assert len(ev) == 1 and ev[0]["redline"] and not ev[0]["guided"]
+    assert "间隔" in ev[0]["sudden_kind"]
+    assert any(m.kind == "突然侧边双押" for m in ha.muri)
+
+
+def test_侧边双押_间隔够大就不突然_负例():
+    ha = _assign("(150){8}8,1,4,2/3,E")
+    assert ha.side_doubles and not ha.side_doubles[0]["redline"]
+    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+
+
+def test_侧边双押_共享键步进算引导_知识030B型():
+    # 用户例：18 / 87 / 76 / 65 / 54 —— 其中 7/6 本身就是侧边双押
+    ha = _assign("(120){4}1/8,8/7,7/6,6/5,5/4,E")
+    ev = [e for e in ha.side_doubles if e["keys"] == [6, 7]]
+    assert ev and ev[0]["guided"] and ev[0]["guide_type"] == "A/B"
+    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+
+
+def test_侧边双押_等距轮转算引导_知识030C型():
+    # 用户例：18 / 23 / 45 / 67 —— 2/3 与 6/7 两组都靠规则轮转成立
+    ha = _assign("(120){4}1/8,2/3,4/5,6/7,E")
+    ks = {tuple(e["keys"]): e for e in ha.side_doubles}
+    assert (2, 3) in ks and (6, 7) in ks
+    assert all(e["guided"] and e["guide_type"] == "C" for e in ks.values())
+    assert not any(m.kind == "突然侧边双押" for m in ha.muri)
+
+
+# ---------------------------------------------------------------------------
+# 星星头与星星条可分属两手（知识 065）
+# ---------------------------------------------------------------------------
+
+
+def test_星头换手不再计代价_知识065():
+    assert hd.PARAMS["w_star_switch"] == 0.0
+    assert hd.PARAMS["w_slide_end_side"] <= 0.02     # 只剩极小 tie-breaker
+
+
+def test_旧口径参数集PARAMS_LEGACY可整体切回v01():
+    body = "(120){8}7h[2:1]/2,5,8,5,8,E"
+    res = parse_chart(body, name="t")
+    old = hd.assign(res, hd.PARAMS_LEGACY)
+    assert hd.PARAMS_LEGACY["hand_model"] == "page"
+    assert hd.PARAMS_LEGACY["w_star_switch"] == 0.25
+    # 旧口径把右手落 5/8 记成越界（深度 1），新口径按 064 记 0 —— 两版可对照
+    assert old.params["w_page"] == 0.30 and old.params["w_chuzhang"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # slide 轨道几何（近似）
 # ---------------------------------------------------------------------------
 
@@ -305,9 +442,11 @@ def test_rows_是六元组():
 
 def test_左右手序列与双押对():
     ha = _assign("(150){8}1,8,15,8,E")
-    assert [k for _, _, k, _ in ha.left_seq] == ["8", "8", "5"] or \
-           [k for _, _, k, _ in ha.left_seq] == ["8", "5", "8"]
+    # 知识 064：1/5/8 都在共享区，谁打由位移（067 位置连续）决定，不再由分页钉死；
+    # 这里只钉住 API 形状与"双押两手各一"这两件事
+    assert len(ha.left_seq) + len(ha.right_seq) == 5
     assert len(ha.pairs) == 1
+    assert (ha.pairs[0][2], ha.pairs[0][3]) == ("5", "1")
     seq = hd.bar_hand_sequences(ha)
     assert set(seq[0]) == {"L", "R", "pairs"}
 

@@ -52,7 +52,8 @@ from dataclasses import dataclass, field
 from typing import Iterator, Sequence
 
 from . import hands as H
-from .hands import HandAssignment, HandTask, cdist, cstep, home_side, page_depth
+from .hands import (HandAssignment, HandTask, cdist, cstep, home_side,
+                    is_chuzhang, page_depth, side_double_events)
 from .simai_parser import NoteEvent, ParseResult
 
 _BEATS_PER_MEASURE = 4.0
@@ -86,8 +87,11 @@ PARAMS: dict = {
     "scatter_min_step_kinds": 3,      # 025 同手步进种类 ≥3
     "require_uniform_interaction": True,   # 018/020–025 是否要求匀拍（知识 018「匀拍节奏下」）
     # --- 手序阈值 ---
-    #: 019 纵连"一手连打 vs 两手拆"的分界：hands.t_required(0) = 83.3 ms（知识 015 反推）
+    #: 019 纵连"一手连打 vs 两手拆"的分界：hands.t_required(0) = 83.3 ms（知识 015 反推）。
+    #: **只对长度 >`vertical_single_hand_max` 的纵连生效**（知识 019 用户补充：长度优先）
     "vertical_split_ms": 83.3,
+    #: 019 用户补充（2026-09-19）：「3 个 tap 或以内」的纵连稍快也可单手 → **已按用户口径定**
+    "vertical_single_hand_max": 3,
     #: 043 出张：被钉住那只手的半圈里，另一只手要跨几个才算出张（ep2 §6 草案给 2）
     "chuzhang_min_cross": 2,
     #: 030 侧边双押"引导"代理窗口（键位版同名参数，知识 030 未给判据）
@@ -136,11 +140,33 @@ PARAMS: dict = {
                          "muri": 0.10, "config": 0.20},
 }
 
-#: **待用户对齐**的口径清单（报告 §"待用户对齐的参数"直接引用）
+#: 原 v1（提交 4942759）列出的 6 个"待用户对齐"口径，**2026-09-19 用户讲授后逐项结案**：
+#:
+#: ======================== ========================================================
+#: ``vertical_split_ms``    **已按用户口径定**（知识 019 补充）：长度优先于速度，
+#:                          ≤3 个 tap 单手合法；速度线只管长度 >3 的那一档
+#: ``chuzhang_min_cross``   **口径已定、阈值仍待**（知识 064）：出张 = R→6/7 / L→2/3
+#:                          已确定；"几个落点才算一段出张配置"用户未给
+#: ``side_double_guard_slots`` **已作废**（知识 030 补充）：改成 `hands.side_double_events`
+#:                          的"突然 ∧ ¬引导"，阈值由 388 官谱标定
+#: ``start_hand``           **已按用户口径定**（知识 067）：段首起手 = 离上一段结束近的手，
+#:                          由 `hands.py` 的位移项 + `w_seg_start_far` 表达，不再强制/枚举
+#: ``one_hand_two_objects`` **已按用户口径定**（知识 066）：保持关闭，理由升级为规划期口径
+#: ``slide_owner_rule``     **已按用户口径定**（知识 065）：头与条可分属两手、无偏好，
+#:                          直接用 `hands.assign` 的结果
+#: ======================== ========================================================
 PENDING_USER_PARAMS: tuple[str, ...] = (
-    "vertical_split_ms", "chuzhang_min_cross", "side_double_guard_slots",
-    "start_hand", "one_hand_two_objects", "slide_owner_rule",
+    "chuzhang_min_cross",      # 仅剩这一个：口径已定（064），"几次算一段"的阈值仍待
 )
+
+#: 已按用户口径结案的口径（保留名字，供报告对照）
+RESOLVED_USER_PARAMS: dict[str, str] = {
+    "vertical_split_ms": "019 补充：长度优先，≤3 tap 可单手",
+    "side_double_guard_slots": "030 补充：改'突然 ∧ ¬引导'，参数作废",
+    "start_hand": "067：段首起手 = 离上一段结束近的手",
+    "one_hand_two_objects": "066：保持关闭（写谱不以手法为导向）",
+    "slide_owner_rule": "065：头与条可分属两手、无偏好",
+}
 
 #: 体力/精度硬度的配置权重（沿用键位版 `configs.CONFIG_WEIGHT`，星星族为本轮新增，
 #: **全部是 agent 设定**——知识 003 只给了定性顺序）
@@ -657,9 +683,11 @@ def _fmt_keys(ks: Sequence[int], n: int = 8) -> str:
 def detect_vertical(ctx: HandCtx) -> list[ConfigHitH]:
     """**019 纵连**（手级）+ 030 子型 `双押纵`。
 
-    规格（§5）：同一键连续 ≥3 个任务；``一手连打`` 与 ``两手交替`` 由
-    ``t_req(0) = 83.3 ms`` 分界（知识 015 反推、知识 019「绝大多数玩家采用拆」）；
-    长纵连（>5）看 ``max_same_run``。
+    规格（§5，**v0.2 按知识 019 的用户补充改**）：同一键连续 ≥3 个任务；
+    **长度优先于速度**——长度 ≤ ``vertical_single_hand_max``（3 个 tap）时
+    「稍快也可以单手处理」，不因为过了 ``t_req(0) = 83.3 ms`` 就算该拆；
+    长度 >3 才按 ``vertical_split_ms`` 判"一手连打 vs 两手拆"。长纵连（>5）看
+    ``max_same_run``。
 
     手级增量：键位版只报"同键 N 连"，手级版还报**这 N 连是被一只手连打还是两手拆的**
     —— 知识 019 的难点（个人差、内屏手）正挂在这个区分上。
@@ -698,7 +726,9 @@ def detect_vertical(ctx: HandCtx) -> list[ConfigHitH]:
                 {"key": k, "length": ln, "long": long_,
                  "hand_seq": "".join(hs), "max_same_run": msr,
                  "split": split_play, "min_gap_ms": round(gmin * 1000, 1),
-                 "below_single_hand_limit": gmin < split}))
+                 "below_single_hand_limit": gmin < split,
+                 # 知识 019 用户补充：≤3 个 tap 的纵连即使稍快也可单手
+                 "single_hand_ok": ln <= ctx.p["vertical_single_hand_max"]}))
         i = j + 1
     # --- 双押纵（知识 030 的子型：两手键都常量）---
     i = 0
@@ -1201,27 +1231,39 @@ def detect_double_run(ctx: HandCtx) -> list[ConfigHitH]:
                  "keys_l": [k for k in lk if k][:16],
                  "keys_r": [k for k in rk if k][:16]}))
         i = j + 1
-    # --- 侧边双押红线（知识 030 铁律）---
-    g = ctx.p["side_double_guard_slots"]
-    for idx, s in enumerate(slots):
-        if not s.is_pair:
+    # --- 侧边双押（知识 030 铁律 + 用户 2026-09-19 的"突然/引导"定义）---
+    # v0.2：判据整体搬到 `hands.side_double_events()`——铁律读作「**禁止突然的**
+    # 侧边双押」，红线 = 突然 ∧ ¬引导；`side_double_guard_slots` 的"周边有同键音"
+    # 代理作废（它被 D 型引导吸收，见 hands.side_double_events 的说明）。
+    for ev in ctx.ha.side_doubles:
+        idx = _slot_at(slots, ev["time"])
+        if idx is None:
             continue
-        ks = {s.hit_key("L"), s.hit_key("R")}
-        ks.discard(None)
-        if ks not in _SIDE_DOUBLES:
-            continue
-        neigh: set[int] = set()
-        for t in range(max(0, idx - g), min(n, idx + g + 1)):
-            if t != idx:
-                neigh |= s_keys(slots[t])
-        guided = bool(ks & neigh)
+        tag = ("红线：突然且无引导" if ev["redline"]
+               else f"有引导（{ev['guide_type']} 型）" if ev["guided"]
+               else "无引导但不突然")
         out.append(_span(
             ctx, idx, idx, "侧边双押", "030",
-            f"{'/'.join(str(x) for x in sorted(ks))}"
-            f"（{'周边有同键音' if guided else '周边无同键音'}）",
-            f"L:{s.hit_key('L')}  R:{s.hit_key('R')}（同半圈相邻）",
-            {"keys": sorted(ks), "guided_proxy": guided}))
+            f"{ev['keys'][0]}/{ev['keys'][1]}（{tag}；距临近位置 {ev['disp_cfg']} 格、"
+            f"距上一配置 {'—' if ev['gap'] is None else format(ev['gap']*1000, '.0f')+' ms'}）",
+            f"L:{ev['L']}  R:{ev['R']}（同半圈相邻，必有一手出张）",
+            {"keys": ev["keys"], "guided": ev["guided"],
+             "guide_type": ev["guide_type"], "sudden": ev["sudden"],
+             "sudden_kind": ev["sudden_kind"], "redline": ev["redline"],
+             "disp_cfg": ev["disp_cfg"], "gap_ms": (None if ev["gap"] is None
+                                                    else round(ev["gap"] * 1000, 1)),
+             "run_len": ev["run_len"]}))
     return out
+
+
+def _slot_at(slots, t: float) -> int | None:
+    """把时间对回槽下标（侧边双押事件来自 `hands`，需要回挂到槽上）。"""
+    best, bd = None, 1e9
+    for i, s in enumerate(slots):
+        d = abs(s.t - t)
+        if d < bd:
+            best, bd = i, d
+    return best if bd <= 0.01 else None
 
 
 def s_keys(s: HSlot) -> set[int]:
@@ -1446,7 +1488,19 @@ class SlideUnit:
 
     @property
     def chuzhang(self) -> bool:
-        """知识 007/043：划轨手不在 slide 末尾所在的半边 → 出张。"""
+        """**出张（知识 064 用户口径）**：划轨手落进出张区（右手 6/7、左手 2/3）。
+
+        头键或尾键任一落进去就算——这只手整条轨都要走一遍。
+        v0.1 的旧口径（"划轨手不在 slide 末尾所在半边"，知识 007）已被 064/065
+        作废，保留在 :attr:`chuzhang_end_side` 里供对照。
+        """
+        if self.hand not in ("L", "R"):
+            return False
+        return is_chuzhang(self.hand, self.key) or is_chuzhang(self.hand, self.end)
+
+    @property
+    def chuzhang_end_side(self) -> bool:
+        """**v0.1 旧口径**：划轨手不在 slide 末尾所在半边（知识 007，已作废）。"""
         if self.end is None or self.hand not in ("L", "R"):
             return False
         return home_side(self.end) != self.hand
@@ -2137,10 +2191,17 @@ def detect_sweep(ctx: HandCtx, runs: Sequence[tuple[int, int]]) -> list[ConfigHi
 def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
     """**037 反手 / 反手交互**（知识 037）。
 
-    判据（ep2 §6，**必须有手序模型**）：存在连续 ≥4 个音，其手序分配使
-    **两手同时落在同一半圈**（右半 1234 或左半 5678），或左手键的顺时针序在右手之前。
+    判据（ep2 §6，**必须有手序模型**）：存在连续 ≥4 个音，其手序分配使两手
+    **真正交叉**（左手落在右半圈且右手落在左半圈），或**两手被挤进同一半圈且其中
+    至少一只手出张**。
 
     这是键位版**根本无法实现**的一条——同一串音符换个手序就从普通交互变成反手。
+
+    ⚠️ **v0.2 收紧了"同半圈"这一支**（知识 064）：v0.1 只要求"两手同在一个半圈"，
+    那是建立在分页二分上的——舒适区模型下左手打 1/4、右手打 5/8 本来就零代价，
+    "两手同在右半圈（如 L=1、R=4）"根本不难，再叫反手与知识 037「**出张的极端形**」
+    的定义冲突。改为**必须有一只手真的出张**（L→2/3 或 R→6/7）。
+    全库效果：5770 → 见报告 §"v0.2 重跑"。
     """
     out: list[ConfigHitH] = []
     slots = [s for s in ctx.slots if s.n_hits == 1 and s.hit_keys[0] is not None]
@@ -2157,8 +2218,11 @@ def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
             kb = b.hit_keys[0] if a.hit_hands[0] == "L" else a.hit_keys[0]
             if ka == kb:
                 break            # 两手敲同一个键是 019 纵连的"拆"，不是 037 反手
+            # ka = 左手键、kb = 右手键
             same_half = ((ka in _RIGHT_HOME and kb in _RIGHT_HOME)
                          or (ka in _LEFT_HOME and kb in _LEFT_HOME))
+            # 知识 064：同半圈只有在**真的出张**时才是 037 说的"出张的极端形"
+            same_half = same_half and (is_chuzhang("L", ka) or is_chuzhang("R", kb))
             crossed = ka in _RIGHT_HOME and kb in _LEFT_HOME
             if not (same_half or crossed):
                 break
@@ -2181,16 +2245,17 @@ def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
 def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
     """**043 出张**（知识 043）。
 
-    知识 043 的"人话"是「**左手打右边，右手打左边**」，机制是「一只手被 slide/hold
-    钉在某一侧，同刻或紧邻的 tap 却落在同一侧 → 另一只手必须跨界」。
+    **v0.2 改按知识 064（用户 2026-09-19）的键位定义**：出张 = **右手落 6/7 或
+    左手落 2/3**，只有这四个「手 × 键」组合；共享区 ``{1,4,5,8}`` 两手都不算。
+    知识 043 的教程侧粗口径（"左手打右边"）与 ep2 §6 的 ``page_depth ≥ 1`` 代理
+    **一并作废**——后者会把右手打 5/8、左手打 1/4 也算成跨界，与用户口径冲突。
 
-    操作化（agent）：以每条 slide/hold 的 **[头, 名义尾]** 为窗口（这段时间里那只手
-    被钉住），统计窗口内 ``page_depth(手, 键) ≥ 1`` 的任务数——**无论跨界的是被钉住的
-    那只手还是另一只**（官谱 `403-最終鬼畜妹` m060 是前者：R 手被自己的 tap 线占住，
-    L 手只好跨到 4 号键去拍头并划轨）。≥ ``chuzhang_min_cross`` 且其中至少有一个是
-    **击打**（不是纯轨道）时判出张。
+    机制部分保留：以每条 slide/hold 的 **[头, 名义尾]** 为窗口（这段时间那只手被
+    钉住），统计窗口内**落进出张区**的任务数；≥ ``chuzhang_min_cross`` 且其中至少
+    有一个是**击打**（不是纯轨道）时判出张。
 
-    ⚠️ ``chuzhang_min_cross`` 是 **待用户对齐**的容忍度（默认 2，ep2 §6 草案口径）。
+    ⚠️ ``chuzhang_min_cross`` 仍是 **待用户对齐**的容忍度（默认 2，ep2 §6 草案口径）：
+    用户只说"轻易不要写"，没说几次才算一段"出张配置"。
     """
     out: list[ConfigHitH] = []
     ha = ctx.ha
@@ -2207,7 +2272,7 @@ def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
         cross = [j for j, x in enumerate(ha.tasks)
                  if x.key is not None and t0 - 1e-6 <= x.t <= t1 + 1e-6
                  and ctx.hand(j) in ("L", "R")
-                 and page_depth(ctx.hand(j), x.key) > 0]
+                 and is_chuzhang(ctx.hand(j), x.key)]
         hits_cross = [j for j in cross
                       if ha.tasks[j].kind not in ("slide", "wifi")]
         if len(cross) >= ctx.p["chuzhang_min_cross"] and hits_cross:
@@ -2215,8 +2280,8 @@ def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
             out.append(_span_tasks(
                 ctx, [ti] + cross, "出张", "043",
                 f"{h} 手被 {t.kind}（{t.key}→{t.end_key or ''}）钉住 {t1 - t0:.2f}s，"
-                f"窗口内 {len(cross)} 个任务跨过分页缝（{desc}）",
-                f"{h}:被钉住  跨界任务 {len(cross)} 个（离开舒适区）",
+                f"窗口内 {len(cross)} 个任务落进出张区（{desc}）",
+                f"{h}:被钉住  出张落点 {len(cross)} 个（知识 064：R→6/7、L→2/3）",
                 {"pin_hand": h, "pin_kind": t.kind, "n_cross": len(cross),
                  "cross": [[ctx.hand(j), ha.tasks[j].key] for j in cross][:8],
                  "dur_sec": round(t1 - t0, 3)}))

@@ -295,9 +295,23 @@ def test_连续双押_负例_只有两个双押():
     assert "连续双押" not in _cfgs("(150){8}1/2,2/3,5,6,7,8,E")
 
 
-def test_侧边双押_红线与引导代理():
-    h = _hits("(150){4}2/3,5,8,1,E", "侧边双押")
-    assert len(h) == 1 and h[0].detail["guided_proxy"] is False
+def test_侧边双押_突然无引导判红线_知识030():
+    # v0.2：判据来自 hands.side_double_events（突然 ∧ ¬引导）
+    h = _hits("(220){8}8,1,4,2/3,E", "侧边双押")
+    assert len(h) == 1 and h[0].detail["redline"] is True
+    assert h[0].detail["guided"] is False
+
+
+def test_侧边双押_共享键步进有引导_负例_知识030B型():
+    h = {tuple(x.detail["keys"]): x for x in _hits("(120){4}1/8,8/7,7/6,6/5,5/4,E", "侧边双押")}
+    assert (6, 7) in h
+    assert h[(6, 7)].detail["guided"] is True and h[(6, 7)].detail["redline"] is False
+
+
+def test_侧边双押_等距轮转有引导_负例_知识030C型():
+    h = {tuple(x.detail["keys"]): x for x in _hits("(120){4}1/8,2/3,4/5,6/7,E", "侧边双押")}
+    assert (2, 3) in h and (6, 7) in h
+    assert all(v.detail["guide_type"] == "C" and not v.detail["redline"] for v in h.values())
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +394,10 @@ def test_同起点拍滑_正例_两手交替各领一根():
 
 def test_三叉戟_正例_恰三根全给一只手():
     # LANCE 型：三根同头 + 另一只手在对侧打自己的线
-    body = "(156){8}1-5[8:1]/8,,1^3[8:1]/7,,1-4[8:1]/6,,3,,E"
+    # v0.2：尾巴那个 tap 改写在左手线上——原来的 `3` 与第三根的启动拍同刻，
+    # 舒适区模型下（知识 064）左手拍 3 是出张，分配器会把第三根改派左手，
+    # 与官谱 LANCE m072–075 的实际形态不符（那里三根始终归一只手，见验证报告 v0.2）
+    body = "(156){8}1-5[8:1]/8,,1^3[8:1]/7,,1-4[8:1]/6,,7,,E"
     hits = _hits(body, "三叉戟")
     assert hits
     d = hits[0].detail
@@ -454,9 +471,15 @@ def test_二连扫_负例_封闭四键是大宇宙():
     assert "二连扫" not in cfgs and "大宇宙" in cfgs
 
 
-def test_反手_正例_两手挤进同一半圈():
-    hits = _hits("(173){16}3,4,1,2,7,8,6,5,E", "反手")
+def test_反手_正例_同半圈且有一只手出张_知识037与064():
+    # 200BPM {16} 的 2↔3 快速交替：一手必须出张到 {2,3} 才打得出来 = 037「出张的极端形」
+    hits = _hits("(200){16}2,3,2,3,2,3,2,3,E", "反手")
     assert hits and hits[0].detail["length"] >= 4
+
+
+def test_反手_负例_同半圈但两手都在舒适区_知识064():
+    # v0.1 把"两手同在右半圈"一律算反手；064 下 L 打 1/4、R 打 2/3 各自舒适，不是反手
+    assert "反手" not in _cfgs("(150){8}1,2,3,4,1,2,3,4,E")
 
 
 def test_反手_负例_正常分页交互():
@@ -467,13 +490,26 @@ def test_反手_负例_两手敲同一个键是纵连的拆():
     assert "反手" not in _cfgs("(240){16}" + "1," * 10 + "E")
 
 
-def test_出张_正例_一手被钉住另一手跨界():
-    hits = _hits("(200){8}8-5[8:1],2,8,1,4-7[8:1],2,4,3,E", "出张")
+def test_出张_正例_按064键位定义():
+    # 左手被 Hold 钉在 7（右手只好去打 6 = 出张），右手位上还有一个 2 落到左手
+    hits = _hits("(120){8}7h[2:1]/2,6,6,6,6,E", "出张")
     assert hits and hits[0].detail["n_cross"] >= 2
+
+
+def test_出张_负例_共享键不算出张_知识064():
+    # 同一形态换成共享键 5/8 —— v0.1 的 page_depth≥1 会误判，064 口径下是 0
+    assert "出张" not in _cfgs("(120){8}7h[2:1]/2,5,8,5,8,E")
 
 
 def test_出张_负例_没有被钉住的手():
     assert "出张" not in _cfgs("(150){16}1,8,2,7,1,8,2,7,E")
+
+
+def test_纵连_短纵连标单手可行_知识019补充():
+    h = _hits("(185){16}1,1,1,,,,,,E", "纵连")
+    assert h and h[0].detail["single_hand_ok"] is True
+    h2 = _hits("(185){16}1,1,1,1,1,1,1,1,E", "长纵连")
+    assert h2 and h2[0].detail["single_hand_ok"] is False
 
 
 def test_2加1_正例():
