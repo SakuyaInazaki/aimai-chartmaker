@@ -64,6 +64,9 @@ class NoteEvent:
     wait: float = 0.0  # slide 启动拍等待（秒）
     shape: str = ""  # slide 形状串，如 '-' / 'V' / 'pp'
     end_key: str = ""  # slide 终点键
+    #: 连锁 slide 的逐段 ``(起点键, 形状, 终点键)``；单段 slide 也给一项。
+    #: `1-3-5` → ``[('1','-','3'), ('3','-','5')]``；wifi `1w5` → ``[('1','w','5')]``
+    segments: tuple[tuple[str, str, str], ...] = ()
     bpm: float = 0.0  # 该 note 所处 BPM
     divisor: float = 0.0  # 该 note 所处分音
 
@@ -236,6 +239,7 @@ class _RawNote:
     wait: float = 0.0
     shape: str = ""
     end_key: str = ""
+    segments: tuple[tuple[str, str, str], ...] = ()
 
 
 def _parse_member(s: str, bpm: float, res: ParseResult, where: str) -> list[_RawNote]:
@@ -340,6 +344,7 @@ def _parse_member(s: str, bpm: float, res: ParseResult, where: str) -> list[_Raw
                         wait=chain["wait"] if chain["wait"] is not None else 60.0 / bpm,
                         shape="".join(seg[0] for seg in chain["segments"]),
                         end_key=chain["segments"][-1][1] if chain["segments"] else "",
+                        segments=_chain_segments(key, chain["segments"]),
                     )
                 )
             continue
@@ -349,6 +354,21 @@ def _parse_member(s: str, bpm: float, res: ParseResult, where: str) -> list[_Raw
             _RawNote(kind="tap", key=key, is_break="b" in flags, is_ex="x" in flags)
         )
     return notes
+
+
+def _chain_segments(head_key: str,
+                    segs: list[tuple[str, str, str]]) -> tuple[tuple[str, str, str], ...]:
+    """把 ``[(形状, 终点键, 形状串里的终点文本), ...]`` 展开成逐段 ``(起点键, 形状, 终点文本)``。
+
+    连锁 slide 里后一段的起点 = 前一段的终点（`1-3-5` → `1-3` + `3-5`）；
+    `V` 的终点文本含拐点（`1V37` → ``('1', 'V', '37')``），拼起来就是形状 key。
+    """
+    out: list[tuple[str, str, str]] = []
+    cur = head_key
+    for shape, end_key, raw_end in segs:
+        out.append((cur, shape, raw_end))
+        cur = end_key
+    return tuple(out)
 
 
 def _parse_slide_chains(
@@ -375,11 +395,13 @@ def _parse_slide_chains(
             if i + 1 >= n:
                 raise SimaiParseError(f"{where}: V 形 slide 缺少键位")
             end_key = s[i + 1]
+            raw_end = s[i] + s[i + 1]  # 拐点 + 终点（形状 key 用）
             i += 2
         else:
             if i >= n:
                 raise SimaiParseError(f"{where}: slide 缺少终点键")
             end_key = s[i]
+            raw_end = end_key
             i += 1
         # 时长括号与 b/x 修饰符的先后顺序两种写法都接受
         # （官方形式 ``1-4[8:3]b``；MajdataView 形式 ``1-4b[4:1]``，语法文档 §4.6）
@@ -394,7 +416,7 @@ def _parse_slide_chains(
                 if s[i] == "b":
                     cur["is_break"] = True
                 i += 1
-        cur["segments"].append((shape, end_key))
+        cur["segments"].append((shape, end_key, raw_end))
 
         if i < n and s[i] == "*":  # 同头多 slide
             i += 1
@@ -477,6 +499,7 @@ def parse_chart(text: str, *, name: str = "<chart>") -> ParseResult:
                     wait=r.wait,
                     shape=r.shape,
                     end_key=r.end_key,
+                    segments=r.segments,
                     bpm=bpm,
                     divisor=divisor if divisor else 0.0,
                 )

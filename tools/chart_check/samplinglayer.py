@@ -31,12 +31,17 @@ TRACK_TO_STEM = {"drum": "drums", "vocal": "vocals", "bass": "bass",
 STEM_TO_TRACK = {v: k for k, v in TRACK_TO_STEM.items()}
 
 
-def _grid_times(bar: dict, track: str) -> list[float]:
-    """一小节里某条轨的候选池时刻（秒）。`-` 是延音，不算新 onset。"""
+def _grid_times(bar: dict, track: str, first: float = 0.0) -> list[float]:
+    """一小节里某条轨的候选池时刻（秒）。`-` 是延音，不算新 onset。
+
+    `first` = `&first`。`song_analysis.json` 的 `start_sec` 是**音频绝对秒**，
+    而 `simai_parser` 的 note 时间从**谱面正文起点**（= `&first`）起算——
+    两套时钟差一个 offset，必须先平掉（note 065 缺口 G16）。
+    """
     pat = (bar.get("patterns") or {}).get(track, "")
     if not pat:
         return []
-    t0 = float(bar.get("start_sec", 0.0))
+    t0 = float(bar.get("start_sec", 0.0)) - first
     bpm = float(bar.get("bpm", 0.0)) or 1.0
     bar_sec = 240.0 / bpm
     n = len(pat)
@@ -44,7 +49,8 @@ def _grid_times(bar: dict, track: str) -> list[float]:
 
 
 def check_sampling(res, analysis: dict | None, measure_texts,
-                   tol: float = 0.030) -> LayerResult:
+                   tol: float = 0.030, first: float = 0.0) -> LayerResult:
+    """`first` = `&first`（秒）。见 `_grid_times` 的说明：两套时钟必须先对齐。"""
     out = LayerResult(layer="采音")
     if not analysis:
         out.skipped = "没有给 --analysis song_analysis.json → 采音层不跑"
@@ -75,10 +81,10 @@ def check_sampling(res, analysis: dict | None, measure_texts,
         b = int(bar["bar"])
         seg = seg_of_bar.get(b, {})
         skel_track = seg.get("skeleton_stem") or "drum"
-        pool = _grid_times(bar, skel_track)
+        pool = _grid_times(bar, skel_track, first)
         # 所有轨合起来（判 extra 用）
-        allpool = sorted({t for tr in TRACK_KEYS for t in _grid_times(bar, tr)})
-        t0 = float(bar.get("start_sec", 0.0))
+        allpool = sorted({t for tr in TRACK_KEYS for t in _grid_times(bar, tr, first)})
+        t0 = float(bar.get("start_sec", 0.0)) - first
         bar_sec = 240.0 / (float(bar.get("bpm", 0.0)) or 1.0)
         ev = slot_arr[(slot_arr >= t0) & (slot_arr < t0 + bar_sec)]
         hit = sum(1 for p in pool if np.any(np.abs(ev - p) <= tol)) if len(ev) else 0
@@ -154,7 +160,7 @@ def check_sampling(res, analysis: dict | None, measure_texts,
             source="知识 068")
 
     out.stats = {"bars": rows, "sections": seg_rows, "mode_counts": mode_all,
-                 "tol_sec": tol,
+                 "tol_sec": tol, "first_sec": first,
                  "口径": "网格候选池（song_analysis.json bars[].patterns），"
                          "非 stems 原始 onset；与 calibration/sampling.py 不可混用"}
     return out

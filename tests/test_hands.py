@@ -631,3 +631,38 @@ def test_参数可覆盖():
     a = hd.assign(parse_chart(body, name="t"))
     b = hd.assign(parse_chart(body, name="t"), {"w_page": 0.0})
     assert b.total_cost <= a.total_cost
+
+
+# ---------------------------------------------------------------------------
+# CLI：带 meta 头的 maidata.txt 只取 `&inote_N=` 之后的正文（note 065 缺口 G17）
+# ---------------------------------------------------------------------------
+
+_MAIDATA = ("&title=Dear Player 2\n&artist=tn-shi\n&first=1.349\n"
+            "&wholebpm=205\n&lv_5=13+\n&des=aimai-chartmaker\n"
+            "&inote_4=\n(205)\n{8}1,2,3,4,5,6,7,8,\nE\n"
+            "&inote_5=\n(205)\n{8}1,,5,,1,,5,,\nE\n")
+
+
+def test_strip_meta_takes_highest_nonempty_inote():
+    body = hd.strip_meta(_MAIDATA)
+    assert body.strip().startswith("(205)")
+    assert "1,,5,,1,,5,," in body and "&title" not in body
+    assert "1,2,3,4,5,6,7,8," not in body       # 没有串到 inote_4
+
+
+def test_strip_meta_can_pick_a_difficulty():
+    assert "1,2,3,4,5,6,7,8," in hd.strip_meta(_MAIDATA, inote=4)
+
+
+def test_strip_meta_passthrough_for_plain_body():
+    plain = "(205)\n{8}1,2,3,4,5,6,7,8,\nE\n"
+    assert hd.strip_meta(plain) == plain
+
+
+def test_meta_header_no_longer_makes_fake_each():
+    """不剥 meta 头时，`&title=Dear Player 2` 这些行的数字会被当成同刻 note，
+    分配器报出一串假多押；剥掉之后应当干净（负例，钉住缺口 G17 已修）。"""
+    dirty = hd.assign(parse_chart(_MAIDATA, name="t"))
+    clean = hd.assign(parse_chart(hd.strip_meta(_MAIDATA), name="t"))
+    assert len(dirty.muri) > 0          # 不剥 → 假无理
+    assert len(clean.muri) == 0         # 剥掉 → 干净

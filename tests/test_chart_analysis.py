@@ -383,3 +383,20 @@ def test_低密段识别():
 
     c = np.array([1.0, 1.0, 0.1, 0.1, 1.0, 1.0])
     assert low_density_runs(c, ratio=0.5) == [(2, 2)]
+
+
+def test_slide_segments_expose_shape_keys():
+    """`NoteEvent.segments` 给出逐段 `(起点, 形状, 终点文本)`——拼起来就是
+    `slide_geometry.json` 的形状 key（连锁 slide 后一段的起点 = 前一段的终点；
+    `V` 的终点文本含拐点）。外部规则层靠它查几何表。"""
+    res = parse_chart("(205)\n{8}1-3-5[8:1],2^5[8:1],1V37[8:1],4w8[8:1],"
+                      "1-4[8:1]*1-6[8:1],\nE\n")
+    segs = [n.segments for n in res.notes if n.kind == "slide_track"]
+    assert segs[0] == (("1", "-", "3"), ("3", "-", "5"))
+    assert segs[1] == (("2", "^", "5"),)
+    assert segs[2] == (("1", "V", "37"),)          # 拐点 3 + 终点 7 → key `1V37`
+    assert segs[3] == (("4", "w", "8"),)
+    assert segs[4] == (("1", "-", "4"),) and segs[5] == (("1", "-", "6"),)
+    # `end_key` 的旧语义不变（单字符终点键）
+    ends = [n.end_key for n in res.notes if n.kind == "slide_track"]
+    assert ends == ["5", "5", "7", "8", "4", "6"]

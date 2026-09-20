@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""检查器主流程：把五层串起来。"""
+"""检查器主流程：把七层串起来。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .excerpt import measure_texts as _measure_texts
 from .maidata import MaiData, read_maidata
 from .model import LAYERS, Issue, LayerResult
 from .play import check_play
+from .murilayer import check_muri
 from .samplinglayer import check_sampling
 from .syntax import check_syntax
 
@@ -81,10 +82,24 @@ def _level_from_text(text: str) -> float | None:
     return v
 
 
+def _first_of(md: MaiData) -> float:
+    """`&first`（秒）。解析不出就当 0。
+
+    `simai_parser` 的 note 时间从谱面正文起点算（不含 `&first`），
+    而 `song_analysis.json` 的 `bars[].start_sec` 是音频绝对秒——
+    采音层要对齐两套时钟（note 065 缺口 G16）。
+    """
+    raw = (md.meta("first") or "").strip()
+    try:
+        return float(raw) if raw else 0.0
+    except ValueError:
+        return 0.0
+
+
 def check_chart(md: MaiData, *, inote: int | None = None,
                 level: float | None = None,
                 analysis: dict | None = None) -> CheckReport:
-    """对一份已切好的 `maidata` 跑完五层。"""
+    """对一份已切好的 `maidata` 跑完七层。"""
     diff, body, _line, body_off = md.pick_inote(inote)
     rep = CheckReport(name=md.meta("title") or Path(md.path).stem or "<chart>",
                       path=md.path, inote=diff)
@@ -105,8 +120,9 @@ def check_chart(md: MaiData, *, inote: int | None = None,
                                         ((analysis or {}).get("structure") or {}).get("segments"),
                                         texts))
         rep.layers.append(check_density(res, rep.level, texts, analysis))
-        rep.layers.append(check_sampling(res, analysis, texts))
+        rep.layers.append(check_sampling(res, analysis, texts, first=_first_of(md)))
         rep.layers.append(check_depth(rep))
+        rep.layers.append(check_muri(res, texts))
     else:
         for layer in LAYERS[1:]:
             lr = LayerResult(layer=layer)

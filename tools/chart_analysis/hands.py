@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
@@ -2004,12 +2005,54 @@ def chart_summary(ha: HandAssignment) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _find_chart(pattern: str):
+_META_LINE_RE = re.compile(r"^&([A-Za-z_0-9]+)=(.*)$")
+
+
+def strip_meta(text: str, inote: int | None = None) -> str:
+    """带 meta 头的 `maidata.txt` → 只留 `&inote_N=` 之后的**谱面正文**。
+
+    没有 `&inote_N=` 就原样返回（已经是正文）。`inote` 缺省取**难度号最大的非空**那份，
+    与 `tools/chart_check` 的 `MaiData.pick_inote` 同口径。
+
+    ⚠️ 不做这一步的后果（note 065 缺口 G17）：`&title=Dear Player 2` /
+    `&lv_5=13+` 这些行里的数字会被当成 note 解析成 `m0000 0.000s` 的一大坨同刻物件，
+    分配器报出一串假的"同刻 13 个需处理对象"多押。
+    """
+    lines = text.split("\n")
+    bodies: dict[int, list[str]] = {}
+    cur: int | None = None
+    saw_meta = False
+    for ln in lines:
+        m = _META_LINE_RE.match(ln)
+        if m:
+            saw_meta = True
+            mi = re.match(r"^inote_([1-7])$", m.group(1))
+            if mi:
+                cur = int(mi.group(1))
+                bodies[cur] = [m.group(2)]
+            else:
+                cur = None
+            continue
+        if cur is not None:
+            bodies[cur].append(ln)
+    if not saw_meta or not bodies:
+        return text
+    if inote is not None and inote in bodies:
+        pick = inote
+    else:
+        nonempty = [d for d in sorted(bodies, reverse=True)
+                    if "\n".join(bodies[d]).strip()]
+        pick = nonempty[0] if nonempty else max(bodies)
+    return "\n".join(bodies[pick])
+
+
+def _find_chart(pattern: str, inote: int | None = None):
     from pathlib import Path
 
     pth = Path(pattern)
     if pth.exists() and pth.is_file():
-        return pth.stem, pth.read_text(encoding="utf-8", errors="replace")
+        return pth.stem, strip_meta(
+            pth.read_text(encoding="utf-8", errors="replace"), inote)
     try:
         from . import corpus
     except ImportError:  # pragma: no cover
@@ -2031,9 +2074,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bars", default="", help="只看某段小节，如 20-24")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--muri-only", action="store_true", help="只列无理标记")
+    ap.add_argument("--inote", type=int, default=None,
+                    help="带 meta 头的 maidata.txt 取哪一个难度（缺省取最大的非空）")
     args = ap.parse_args(argv)
 
-    name, text = _find_chart(args.chart)
+    name, text = _find_chart(args.chart, args.inote)
     res = parse_chart(text, name=name)
     ha = assign(res)
 

@@ -108,6 +108,17 @@ _NEED_META = ("title", "artist", "des", "first")
 #: `docs/simai-syntax.md` §2.2：meta 文本里的半角 `&` `+` `%` `\` 必须转义
 _META_RAW = "&+%\\"
 
+#: 只有**文本类** meta 受转义规则约束（`docs/simai-syntax.md` §2.2：
+#: 「meta **文本**中的半角 `&` `+` `%` `\` 必须写成 `\＆` `\＋` `\％` `\￥`」）。
+#: `&lv_N=` 是**等级值**不是文本，同节明写「可写 `13+`（+半角）」——
+#: 早先版本把 `&lv_5=13+` 报成未转义是**误报**（note 065 记录的工具缺口）。
+_TEXT_META_KEYS = ("title", "artist", "des")
+
+
+def _is_text_meta(key: str) -> bool:
+    """`title` / `artist` / `des` / `des_N` 才走转义检查。"""
+    return key in _TEXT_META_KEYS or key.startswith("des_")
+
 
 def check_meta(md: MaiData, out: LayerResult) -> None:
     keys = {m.key for m in md.metas}
@@ -124,7 +135,7 @@ def check_meta(md: MaiData, out: LayerResult) -> None:
                 line=[m.line for m in md.metas if m.key == "first"][0],
                 source="simai-error-checking §8.3")
     for m in md.metas:
-        if m.key.startswith("inote_"):
+        if not _is_text_meta(m.key):
             continue
         for k, ch in enumerate(m.value):
             if ch in _META_RAW:
@@ -147,6 +158,8 @@ def check_meta(md: MaiData, out: LayerResult) -> None:
 def check_comments_and_brackets(body: str, ctx: _Ctx, out: LayerResult) -> None:
     lines = body.split("\n")
     pos = 0
+    #: `(行, 列, 原文, 下一行是否以 `{` 开头)`——VM 兼容风险汇总用
+    comment_lines: list[tuple[int, int, str, bool]] = []
     for li, line in enumerate(lines):
         # 单个 `|`（SimaiSharp 直接抛 UnexpectedCharacterException）
         j = 0
@@ -168,7 +181,27 @@ def check_comments_and_brackets(body: str, ctx: _Ctx, out: LayerResult) -> None:
             out.add("警告", "SYN-COMMENT-EOF",
                     "`||` 注释在文件末尾且没有换行结尾——不换行时注释不生效",
                     line=ln, col=col, source="simai-syntax §3.6")
+        if cut >= 0:
+            nxt = lines[li + 1].lstrip() if li + 1 < len(lines) else ""
+            ln, col = line_col(ctx.text, ctx.body_off + pos + cut)
+            comment_lines.append((ln, col, line.strip()[:80], nxt.startswith("{")))
         pos += len(line) + 1
+
+    if comment_lines:
+        ln, col, excerpt, _ = comment_lines[0]
+        n_swallow = sum(1 for *_, hit in comment_lines if hit)
+        out.add("错误", "SYN-VM-COMMENT",
+                f"**Visual Maimai 兼容风险**：正文里有 **{len(comment_lines)} 行 `||` 行尾注释**"
+                f"（其中 **{n_swallow}** 行的下一行以 `{{` 开头）。"
+                "VM 会**吞掉 `||` 注释行之后那一行行首的 `{x}` 分音标记**，整段按上一个分音重算"
+                "——test-01 实测：m004–m058 的 `{8}` 被当成 `{16}` 走，"
+                "谱面从 128 小节 / 149.9 s 缩成 108.5 小节，note 位置全错位。"
+                "官方谱 414 份里 **405 份有行首 `{x}`、0 份含 `||`**，"
+                "所以触发条件是注释而不是行首分音。"
+                "**交付版必须是官方格式：一行一小节、行首 `{x}` 可留、`||` 一个不留**；"
+                "设计意图注释另存（`out/<曲名>/maidata-annotated.txt` 或 writeup 小节表）。",
+                line=ln, col=col, excerpt=excerpt,
+                source="simai-error-checking §9.1")
 
     s, _ = normalize_with_map(body)
     for op, cl, code in (("(", ")", "SYN-PAREN"), ("{", "}", "SYN-BRACE"),

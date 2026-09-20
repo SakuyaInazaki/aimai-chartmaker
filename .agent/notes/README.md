@@ -89,3 +89,5 @@
 | 063 | 写谱认识补强 I：段落×定数 note 种类配比、舍音时舍哪一半（纯按音乐）、星星族在前奏/间奏/减压段的官谱用法；知识 088+；检查器"配比/写得太浅"提示；SOP v0.2；试写二与官方谱对照 | 2026-09-20 |
 | 064 | 测试曲《Dear Player 2 / tn-shi》（BV1v7ec6JEke）：匿名取音频、自动定 BPM/offset、跑音频分析出 song sheet（用户要测试写谱实力） | 2026-09-20 |
 | 065 | 测试曲写谱：按 SOP 与知识库写 Master 谱（samples/test-01），过检查器后交付桌面可导入文件夹，等用户检测 | 2026-09-20 |
+| 066 | 测试谱无理修正：复现 Visual Maimai/MiaCode 无理规则为检查器第七层（官谱基线校准），逐处重写 samples/test-01 命中小节；修 &first≠0 采音层时钟与 hands CLI 吃 meta 头、lv 半角 + 误报 | 2026-09-20 |
+| 067 | 测试曲 tempo map 重做：滑窗 onset-fit / librosa beat-plp / beat_this 三路瞬时 BPM 曲线，排查残差偏大块、breakdown、build、outro 与半拍归属，回答"BPM 是否恒定"（结论 205 恒定、&first=1.349 不变）；定因"全不对齐"= Visual Maimai 吞掉 `||` 注释行之后的行首 `{x}`，交付版改官方格式无注释 | 2026-09-20 |

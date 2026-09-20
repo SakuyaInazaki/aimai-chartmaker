@@ -12,7 +12,7 @@ python3 -m tools.chart_check <maidata.txt> [--level 13.5]
 - `--analysis` 缺省时找 `maidata.txt` 同目录的 `song_analysis.json`；没有就跳过采音层。
 - 退出码：有**错误**返回 1，否则 0。
 
-## 六层与依据
+## 七层与依据
 
 | 层 | 做什么 | 依据 |
 |----|--------|------|
@@ -22,6 +22,35 @@ python3 -m tools.chart_check <maidata.txt> [--level 13.5]
 | **密度** | note 总数 / NPS / 逐小节曲线 / 五段形状 / 密度地板 / 末段形态 / 后半比前半 | 知识 004、031（§1/§2/§4/§5/§7/§10）、001 |
 | **采音** | 逐段 全踩 / 舍音 / 留白 与骨架轨对照；标「该有音却整段留白」「采空音密集」 | 知识 068、081、086；三词切点复用 `calibration.sampling.THRESHOLDS` |
 | **深度** | 跑在最后、只消费前五层的 stats：手序难度 / note 种类占比 / 主料构成 与**同定数档官谱分布**对照，合成一条「**写得太浅？**」复核提示 | 知识 093（+ 073 / 078 / 088） |
+| **外部规则** | 换一套无理口径：**MiaCode / MaiMuriDX 的静态无理检测**（外键 / 撞尾 / 叠键），即 Visual Maimai 无理面板真正会弹的那些 | MiaCode `MURI_DETECTION_SPEC` §3–§9；`docs/simai-error-checking.md` §8.5；`docs/research/miacode-vm-research.md` §A.6 |
+
+### 第七层：外部规则（2026-09-20 新增）
+
+前六层用的是**本项目自己的口径**：`hands.py` 的无理按 388 官谱校准，很宽。
+第七层换成**社区工具的口径**——用户把 `samples/test-01` 导进 **Visual Maimai** 后
+「提示了很多无理」，而 `hands.py` 报 0，差的就是这一层。
+
+- **实现方式是复用不是重推**：规则逐条翻译自上游 **Starrah/MaiMuriDX**
+  `judge.py::StaticMuriChecker.check`（46–197 行），常量取它的 `core.py` + `config.json`；
+  slide 几何 `data/slide_geometry.json`（600 形状 + 8 wifi 的 A 区进入时刻）由它的
+  `slides.py::SlideInfo` 直接导出。MiaCode 的 5 类 `MuriKind` 与 MaiMuriDX 同源。
+- **对齐验证**：`out/calib` **160 首官谱 + 本项目 test-01（修正前后）**逐条与
+  MaiMuriDX 的静态输出比对，**命中种类与条数完全一致**。
+- **只覆盖静态三类**：`SlideHeadTap`（外键）/ `TapOnSlide`（撞尾）/ `Overlap`（叠键）。
+  `SlideTooFast`（内屏）与 `MultiTouch`（多押）在 spec §3 里**只有运行时分析、没有静态参考**，
+  本层不复现那套 180 TPS 手势模拟 → **本层 0 命中 ≠ MiaCode 面板 0 条**。
+- **级别按 spec §6 原样映射**（Muri→错误、Warning→警告），**不放宽**；
+  另给一条 `MURI-TOTAL` 汇总，把官谱基线印在旁边。
+
+**官谱基线**（`out/calib` 40 首 ST Re:MASTER，定数 13.0–14.5，同一套检测）：
+
+```
+总命中 151 条 / 40 首｜中位 3｜均值 3.8｜p90 10｜最大 21（ユビキリ）｜13 首为 0
+每百 note：中位 0.365 / 均值 0.523 / 最大 3.271
+```
+
+**官谱自己也命中**，所以不是「有一条就写坏了」；但**生成端的验收目标是 0**，
+留下来的每一条都要写明理由（test-01 修正前 24 条 = 每百 note 2.61，比 40 首里最差的还多）。
 
 ### 本轮新增的两组提示（2026-09-20）
 

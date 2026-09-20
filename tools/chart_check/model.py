@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: 六层的固定顺序（报告与 JSON 都按这个顺序）。
-#: 前五层各自独立跑；**「深度」层跑在最后、只消费前五层的 `stats`**（见 `depthlayer.py`）。
-LAYERS = ("语法", "手序", "配置", "密度", "采音", "深度")
+#: 七层的固定顺序（报告与 JSON 都按这个顺序）。
+#: 前五层各自独立跑；**「深度」层跑在最后、只消费前五层的 `stats`**（见 `depthlayer.py`）；
+#: **「外部规则」层用 MiaCode / MaiMuriDX 的无理口径**，与第二层手序层并列（见 `murilayer.py`）。
+LAYERS = ("语法", "手序", "配置", "密度", "采音", "深度", "外部规则")
 
 #: 三个严重级别。`错误` 必须修；`警告` 要看一眼；`提示` 只是复核清单，不判对错。
 LEVELS = ("错误", "警告", "提示")

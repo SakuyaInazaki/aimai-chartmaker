@@ -360,7 +360,7 @@ def test_report_renders_markdown_and_json():
     data = json.loads(render_json(rep))
     assert data["external_lint"].startswith("未接")
     assert {L["layer"] for L in data["layers"]} == {
-        "语法", "手序", "配置", "密度", "采音", "深度"}
+        "语法", "手序", "配置", "密度", "采音", "深度", "外部规则"}
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +474,141 @@ def test_depth_single_flag_is_not_shallow():
     rep = _check(_ONESTROKE, level=13.5)
     c = codes(rep, "深度")
     assert "DEP-SHALLOW-1" in c and "DEP-SHALLOW" not in c
+
+
+# ---------------------------------------------------------------------------
+# 外部规则层（MiaCode / MaiMuriDX 无理检测）
+#
+# ⚠️ **期望值不是我编的**：下面每条的命中数与 gap 都用上游 Starrah/MaiMuriDX
+# 的 `cli.py`（静态检查那一段）跑过同一段谱文本对齐；`data/slide_geometry.json`
+# 本身也由它的 `SlideInfo` 导出。
+# ---------------------------------------------------------------------------
+
+#: MURI_DETECTION_SPEC §7.4 的官方样例：slide 头提前判掉后面的 tap
+_SPEC_HEADTAP = "(240){16}\n8>3[4:1],,,,,\n8,\nE\n"
+#: 同 §9：`111` 同刻三叠键只留一条
+_SPEC_OVERLAP = "(240){16}\n111,\nE\n"
+
+
+def test_muri_layer_reproduces_spec_headtap_example():
+    """MURI_DETECTION_SPEC §7.4 的样例：`8>3[4:1]` 之后的 `8` 被蹭。"""
+    rep = _check(_SPEC_HEADTAP)
+    lr = rep.layer("外部规则")
+    kinds = [h["kind"] for h in lr.stats["hits"]]
+    assert kinds == ["SlideHeadTap"], lr.stats["hits"]
+    # MaiMuriDX 报 -62 ms（判定区间 200 ms 内）
+    assert abs(lr.stats["hits"][0]["gap_ms"] - 62) < 1.5
+
+
+def test_muri_layer_dedupes_overlap_per_moment():
+    """同一时刻的叠键只留一条（MURI_DETECTION_SPEC §9）。"""
+    rep = _check(_SPEC_OVERLAP)
+    lr = rep.layer("外部规则")
+    assert lr.stats["counts"] == {"Overlap": 1}, lr.stats["hits"]
+    assert "MURI-OVERLAP" in codes(rep, "外部规则", "错误")
+
+
+def test_muri_layer_start_tap_on_shoot_is_not_a_hit():
+    """拍滑：启动拍上的 tap 恰在启动时刻 → gap 0，**不算外键**（负例）。
+
+    `1-5[8:1],,1,` 在 205 BPM `{8}` 下，`1` 正好落在启动拍（marker + 1 拍）。
+    """
+    rep = _check("(205)\n{8}1-5[8:1],,1,,,,,,\nE\n")
+    lr = rep.layer("外部规则")
+    assert lr.stats["hits"] == []
+    assert "MURI-OK" in codes(rep, "外部规则")
+
+
+def test_muri_layer_catches_relay_head_on_previous_tail():
+    """205 BPM 两拍接力的一笔画：下一根的头落在上一根尾区 → 撞尾。
+
+    这正是 test-01 修正前 18 处命中里最典型的一族（note 066）。
+    """
+    rep = _check("(205)\n{8}2^5[8:1],,2,7,5^8[8:1],,5,1,\nE\n")
+    lr = rep.layer("外部规则")
+    kinds = [h["kind"] for h in lr.stats["hits"]]
+    assert "TapOnSlide" in kinds
+    hit = next(h for h in lr.stats["hits"] if h["kind"] == "TapOnSlide")
+    assert hit["cause"] == "2^5" and abs(hit["gap_ms"] - 161) < 1.5
+
+
+def test_muri_layer_relay_one_key_short_is_clean():
+    """把第一根缩短一键（`2^5` → `2^4`）后同一小节归零（负例，note 066 的改法）。"""
+    rep = _check("(205)\n{8}2^4[8:1],,2,7,5^8[8:1],,5,1,\nE\n")
+    assert rep.layer("外部规则").stats["hits"] == []
+
+
+def test_muri_layer_total_line_carries_official_baseline():
+    """有命中时要给一条汇总，并把官谱基线印出来（防止被当成"有一条就写坏了"）。"""
+    rep = _check(_SPEC_HEADTAP)
+    msg = next(i.message for i in rep.issues if i.code == "MURI-TOTAL")
+    assert "中位 3" in msg and "验收目标是 0" in msg
+
+
+def test_muri_layer_geometry_table_covers_all_shapes():
+    """几何表要认得 12 种形状 + wifi；认不出的形状必须显式报出来。"""
+    from tools.chart_check.murilayer import load_geometry
+    geo = load_geometry()
+    for key in ("1-4", "2^5", "1v4", "1V37", "2p4", "1qq5", "8<5", "3>7",
+                "1s5", "1z5", "1pp5", "6q3"):
+        assert key in geo["slides"], key
+    assert "1w5" in geo["wifi"]
+
+
+def test_meta_escape_only_applies_to_text_metas():
+    """`&lv_5=13+` 的半角 `+` 合法（simai-syntax §2.2），`&title=` 里的不合法。"""
+    ok = parse_maidata("&title=t\n&artist=a\n&des=d\n&first=0\n"
+                       "&lv_5=13+\n&inote_5=\n(205)\n{8}1,,,,,,,,\nE\n", path="<t>")
+    assert "SYN-META-ESCAPE" not in codes(check_chart(ok))
+    bad = parse_maidata("&title=a+b\n&artist=a\n&des=d\n&first=0\n"
+                        "&lv_5=13+\n&inote_5=\n(205)\n{8}1,,,,,,,,\nE\n", path="<t>")
+    assert "SYN-META-ESCAPE" in codes(check_chart(bad))
+
+
+def test_sampling_layer_shifts_analysis_clock_by_first():
+    """`&first ≠ 0` 时采音层要把 `start_sec` 平移回谱面时钟（note 065 缺口 G16）。
+
+    同一份谱 + 同一份 analysis，只把 `&first` 与 `start_sec` 同步挪 1.349 s，
+    coverage 必须一模一样。
+    """
+    body = "(120)\n{4}1,2,3,4,\nE\n"
+    analysis = {"bars": [{"bar": 0, "start_sec": 0.0, "bpm": 120,
+                          "patterns": {"drum": "XXXX"}}],
+                "structure": {"segments": [{"start_bar": 0, "end_bar": 0,
+                                            "skeleton_stem": "drum",
+                                            "function": "intro"}]}}
+    base = check_chart(parse_maidata(HEAD + body, path="<t>"), analysis=analysis)
+    shifted = json.loads(json.dumps(analysis))
+    shifted["bars"][0]["start_sec"] = 1.349
+    head2 = HEAD.replace("&first=0", "&first=1.349")
+    moved = check_chart(parse_maidata(head2 + body, path="<t>"), analysis=shifted)
+    assert (moved.layer("采音").stats["bars"][0]["coverage"]
+            == base.layer("采音").stats["bars"][0]["coverage"] == 1.0)
+    assert moved.layer("采音").stats["first_sec"] == 1.349
+
+
+# ---------------------------------------------------------------------------
+# 交付格式：Visual Maimai 吞分音（2026-09-20 实测，simai-error-checking §9.1）
+# ---------------------------------------------------------------------------
+
+
+def test_vm_comment_is_an_error():
+    """`||` 行尾注释 = VM 兼容风险，交付版必须去掉（一条汇总错误）。"""
+    rep = _check("(205)\n{8}1,2,3,4,5,6,7,8,  ||m001 测试\n{16}1,,2,,3,,4,,"
+                 "5,,6,,7,,8,,\nE\n")
+    assert "SYN-VM-COMMENT" in codes(rep, "语法", "错误")
+    msg = next(i.message for i in rep.issues if i.code == "SYN-VM-COMMENT")
+    assert "1 行 `||` 行尾注释" in msg and "1** 行的下一行以 `{` 开头" in msg
+
+
+def test_no_comment_body_is_clean():
+    """官方格式（一行一小节、行首 `{x}`、无注释）不该报（负例）。"""
+    rep = _check("(205)\n{8}1,2,3,4,5,6,7,8,\n{16}1,,2,,3,,4,,5,,6,,7,,8,,\nE\n")
+    assert "SYN-VM-COMMENT" not in codes(rep, "语法")
+
+
+def test_vm_comment_counts_only_lines_before_a_divisor_line():
+    """下一行不以 `{` 开头时仍然报（注释本身就是风险），但计数要分开。"""
+    rep = _check("(205)\n{8}1,2,3,4,5,6,7,8,  ||a\n1,2,3,4,5,6,7,8,  ||b\nE\n")
+    msg = next(i.message for i in rep.issues if i.code == "SYN-VM-COMMENT")
+    assert "2 行 `||` 行尾注释" in msg and "0** 行的下一行以 `{` 开头" in msg
