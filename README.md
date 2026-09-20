@@ -37,7 +37,7 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [x] 官方谱配置分布扫描：本地 388 个官方 ST 谱 → [`docs/research/config-usage-survey.md`](docs/research/config-usage-survey.md)（agent 观察，待用户确认）
 - [x] 官方谱逐谱精读：本地 14 级 **87 个谱面文件全部读完**（配置构成 / 强度难度分布 / 可复用手法 / 存疑）→ [`docs/research/level14-readings.md`](docs/research/level14-readings.md)
 - [x] 制谱认知知识库 **94 条**原子条目（用户逐条讲授含手序讲授 + 官方谱实证 + B 站《配置术语》第二/三期教程消化，星星配置含手级定义）→ [`.agent/knowledge/`](.agent/knowledge/)
-- [x] 过程记录与变更日志 **68 篇**（编号 001–068）→ [`.agent/notes/`](.agent/notes/)
+- [x] 过程记录与变更日志 **70 篇**（编号 001–070）→ [`.agent/notes/`](.agent/notes/)
 
 **进行中 / 下一步**
 
@@ -46,7 +46,7 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [ ] 分析工具迭代与标定（basic-pitch 装包、结构标签人工复核、RWC-Pop / osu2beat2025 评测、强度权重标定需官方音频）
 - [ ] 谱面生成 → 校验链路（四层校验蓝本见 `docs/simai-error-checking.md` §10）
 - [x] 写谱工作流 v0.1：谱面检查器 → [`tools/chart_check/`](tools/chart_check/)、操作 SOP → [`docs/workflow-sop.md`](docs/workflow-sop.md)、端到端试写与官方谱对照 → [`docs/research/e2e-trial-01.md`](docs/research/e2e-trial-01.md)（试写谱面在 [`samples/`](samples/)）
-- [x] 真实出题测试《Dear Player 2》→ [`samples/test-01/`](samples/test-01/)、[`docs/research/test-01-writeup.md`](docs/research/test-01-writeup.md)（notes 064–068：tempo map 三路交叉后被用户的抄谱 BPM 表推翻——中段 205 恒定、前奏/尾奏变速，按音频逐段复核重做；Visual Maimai 吞掉 `||` 注释行之后的行首 `{x}`，交付版改官方格式无注释；MaiMuriDX/MiaCode 静态无理复现为检查器第七层并清零）
+- [x] 真实出题测试《Dear Player 2》→ [`samples/test-01/`](samples/test-01/)、[`docs/research/test-01-writeup.md`](docs/research/test-01-writeup.md)（notes 064–070：tempo map 三路交叉后被用户的抄谱 BPM 表推翻——中段 205 恒定、前奏/尾奏变速，按音频逐段复核重做；下拍相位只凭音频裁定为整体早一拍；用户授权以抄谱为教材做同曲逐段对照（[`docs/research/test-01-vs-reference.md`](docs/research/test-01-vs-reference.md)，知识 095–104）后按教训重写 v2，相似度自检不抄 note 序列；Visual Maimai 吞掉 `||` 注释行之后的行首 `{x}`，交付版改官方格式无注释；MaiMuriDX/MiaCode 静态无理复现为检查器第七层并清零）
 - [ ] 写谱工作流迭代：按试写暴露的认识缺口补知识与工具，再试写对照
 
 ## 目录导览
