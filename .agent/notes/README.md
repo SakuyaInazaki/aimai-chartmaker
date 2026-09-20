@@ -92,3 +92,5 @@
 | 066 | 测试谱无理修正：复现 Visual Maimai/MiaCode 无理规则为检查器第七层（官谱基线校准），逐处重写 samples/test-01 命中小节；修 &first≠0 采音层时钟与 hands CLI 吃 meta 头、lv 半角 + 误报 | 2026-09-20 |
 | 067 | 测试曲 tempo map 重做：滑窗 onset-fit / librosa beat-plp / beat_this 三路瞬时 BPM 曲线，排查残差偏大块、breakdown、build、outro 与半拍归属，回答"BPM 是否恒定"（先判 205 恒定，后被用户抄谱 BPM 表推翻：中段 205 恒定、前奏/尾奏变速，追加更正节）；定因"全不对齐"= Visual Maimai 吞掉 `||` 注释行之后的行首 `{x}`，交付版改官方格式无注释 | 2026-09-20 |
 | 068 | 测试谱变速修正：按复核后的 tempo map（前奏 195→减速→125→155→205 主体→尾奏 221→…→108）重排 samples/test-01 前奏与尾奏小节、插入 (bpm) 序列与新 &first；配置仍为自写、不抄外部抄谱；检查器全层复跑、桌面包同步 | 2026-09-20 |
+| 069 | 测试谱对照学习：用户提供的《Dear Player 2》Master 抄谱（DX，touch 与新版星星不计）与 samples/test-01 按小节对齐逐段对照——采音对象、密度走向、note 种类、配置词汇、手序、前奏弱起/减速/最低点/drop/breakdown/build/尾杀的写法；差距与教训落成 docs/research/test-01-vs-reference.md 与知识条目 | 2026-09-20 |
+| 070 | 测试谱重写 v2：按 069 的教训重写 samples/test-01（只学写法不抄 note 序列，相似度自检），全层检查与桌面包同步 | 2026-09-20 |

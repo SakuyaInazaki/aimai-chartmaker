@@ -15,6 +15,8 @@
 |------|------|
 | `simai_parser.py` | simai 正文解析：BPM / 分音 / `{#秒}` / 逗号推进 / tap / hold / slide / touch / each / 修饰符 → `NoteEvent` 时间轴 |
 | `density.py` | 逐小节统计、曲线归一与 32-bin 重采样、休息段与平台段、变点检测分段、k-means 聚类、五段模板检验 |
+| `dx_filter.py` | **DX 谱 → ST 可比视图**：丢 touch / 拼接星星，摘 EX、Break HOLD、滑条绝赞，**时间轴不动**；统计丢弃了什么；`render_bars()` 逐小节回写（`python3 -m tools.chart_analysis.dx_filter <maidata.txt>`） |
+| `similarity.py` | **相似度自检**：我们的谱 vs 参考谱，逐小节完全相同（按 note 数分空 / 单音 / **≥2 note**）+ n-gram 重合率（带基线与地板对照）（`python3 -m tools.chart_analysis.similarity <ours> <ref> --baseline <旧谱> --control`） |
 | `corpus.py` | 官方谱文件发现 + manifest 元数据关联 |
 | `cli.py` | 命令行入口 |
 
