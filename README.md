@@ -36,8 +36,8 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [x] 官方音频 × 官方谱**配对标定与切轨验证**（**160 首**官方 ST 曲、六曲风分层，本机私有数据）→ [`tools/calibration/`](tools/calibration/)、[`docs/research/audio-chart-calibration-n160.md`](docs/research/audio-chart-calibration-n160.md)（n=40 / n=8 版保留作对照）；分轨细化实验 → [`docs/research/stem-refinement-n40.md`](docs/research/stem-refinement-n40.md)
 - [x] 官方谱配置分布扫描：本地 388 个官方 ST 谱 → [`docs/research/config-usage-survey.md`](docs/research/config-usage-survey.md)（agent 观察，待用户确认）
 - [x] 官方谱逐谱精读：本地 14 级 **87 个谱面文件全部读完**（配置构成 / 强度难度分布 / 可复用手法 / 存疑）→ [`docs/research/level14-readings.md`](docs/research/level14-readings.md)
-- [x] 制谱认知知识库 **67 条**原子条目（用户逐条讲授含手序讲授 + 官方谱实证 + B 站《配置术语》第二/三期教程消化，星星配置含手级定义）→ [`.agent/knowledge/`](.agent/knowledge/)
-- [x] 过程记录与变更日志 **55 篇**（编号 001–055）→ [`.agent/notes/`](.agent/notes/)
+- [x] 制谱认知知识库 **87 条**原子条目（用户逐条讲授含手序讲授 + 官方谱实证 + B 站《配置术语》第二/三期教程消化，星星配置含手级定义）→ [`.agent/knowledge/`](.agent/knowledge/)
+- [x] 过程记录与变更日志 **63 篇**（编号 001–063）→ [`.agent/notes/`](.agent/notes/)
 
 **进行中 / 下一步**
 
@@ -45,7 +45,8 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 - [ ] 逐谱精读向 13 级及以下扩展（待用户安排）
 - [ ] 分析工具迭代与标定（basic-pitch 装包、结构标签人工复核、RWC-Pop / osu2beat2025 评测、强度权重标定需官方音频）
 - [ ] 谱面生成 → 校验链路（四层校验蓝本见 `docs/simai-error-checking.md` §10）
-- [ ] 拿到 mp3 后的完整操作 SOP（工作流指引）
+- [x] 写谱工作流 v0.1：谱面检查器 → [`tools/chart_check/`](tools/chart_check/)、操作 SOP → [`docs/workflow-sop.md`](docs/workflow-sop.md)、端到端试写与官方谱对照 → [`docs/research/e2e-trial-01.md`](docs/research/e2e-trial-01.md)（试写谱面在 [`samples/`](samples/)）
+- [ ] 写谱工作流迭代：按试写暴露的认识缺口补知识与工具，再试写对照
 
 ## 目录导览
 
@@ -54,7 +55,8 @@ AI 舞萌（maimai DX）**制谱软工作流 + 制谱经验知识体系**。
 | [`AGENT.md`](AGENT.md) | 项目概述、当前阶段、工作准则（coding agent 必读） |
 | [`docs/`](docs/) | 定稿文档：simai 语法 / 报错判定 / ST 谱面要素 / 音频分析 / 手序模型 |
 | [`docs/research/`](docs/research/) | 调研报告 + 官方谱扫描 + 14 级逐谱精读记录 + 官方谱密度曲线实测 |
-| [`tools/`](tools/) | 分析工具：`audio_analysis/`（音频分析原型）、`chart_analysis/`（simai 解析器与密度统计）、`calibration/`（音频×官方谱配对标定） |
+| [`tools/`](tools/) | 分析工具：`audio_analysis/`（音频分析 + song sheet）、`chart_analysis/`（simai 解析器、左右手分配器、手序版配置识别器、密度与定数×BPM 对照）、`calibration/`（音频×官方谱配对标定、采音方式）、`chart_check/`（谱面检查器） |
+| [`samples/`](samples/) | 本项目自创的试写谱面文本（无音频） |
 | [`tests/`](tests/) | 单元测试（自写 simai 片段 + 合成音频，不含真实音频/官方谱原文） |
 | [`.agent/knowledge/`](.agent/knowledge/) | 制谱认知知识库（原子条目，含日期/理由/来源/置信度/修订记录） |
 | [`.agent/notes/`](.agent/notes/) | 过程记录与变更日志（编号索引见其 README） |
