@@ -20,7 +20,8 @@ import numpy as np
 from . import (__version__, decode, features as feat_mod, grid as grid_mod,
                intensity as intensity_mod, onsets, pitch_notes as pn_mod, quantize,
                sheet, stemplan, stems, tracks)
-from .grid import Grid, check_offset, offset_verdict, parse_bpm_changes
+from .grid import (Grid, check_offset, offset_verdict, parse_bpm_changes,
+                   tempo_map, tempo_map_verdict)
 from .structure import (analyze_structure, assign_functions, suggest_division, tier_of)
 
 STEM_ORDER = ("drums", "bass", "other", "vocals")
@@ -97,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"offset 校验搜索半径（拍），默认 {grid_mod.DEFAULT_SEARCH_BEATS}。"
                         f"**不得 ≥0.5**（半拍处是反拍，会并列夺峰，v0.2 的 ±1 拍就是"
                         f"Signature/麒麟假警报的根因）")
+    p.add_argument("--no-tempo-map", action="store_true",
+                   help="跳过 tempo map 复核（BPM 恒定/变速判定 + 半拍归属）。"
+                        "默认开启，替代旧的「8/16 小节块 + 32 分网格」漂移检测")
+    p.add_argument("--no-beat-this", action="store_true",
+                   help="tempo map 里不跑 beat_this（没装时本来就会自动跳过）")
+    p.add_argument("--tempo-scan-lo", type=float, default=None,
+                   help="tempo map 全域扫描下限 BPM（默认 100）")
+    p.add_argument("--tempo-scan-hi", type=float, default=None,
+                   help="tempo map 全域扫描上限 BPM（默认 260）")
     p.add_argument("--no-allin1", action="store_true",
                    help="跳过 all-in-one，边界只用 novelty + 重复段两路")
     p.add_argument("--align-to-detected", action="store_true",
@@ -220,6 +230,63 @@ def run(args: argparse.Namespace) -> dict:
     else:
         timings["stems"] = 0.0
         print("[4/8] 跳过分离")
+
+    # ---- 4b. tempo map 复核（v1.5：替代旧的 8/16 小节块 + 32 分网格漂移检测）----
+    tm: dict = {"available": False, "reason": "调用方关闭（--no-tempo-map）"}
+    tm_verdict = ""
+    if not args.no_tempo_map:
+        t0 = time.time()
+        try:
+            import librosa as _lr
+            y_mix_hi, _ = _lr.load(str(wav), sr=grid_mod.TEMPO_SR, mono=True)
+            y_drums_hi = y_bass_hi = None
+            for nm, target in (("drums", "y_drums_hi"), ("bass", "y_bass_hi")):
+                pth = stems_dir / f"{nm}.wav"
+                if pth.exists():
+                    arr, _ = stems.load_stem_mono(pth, sr=grid_mod.TEMPO_SR)
+                    if target == "y_drums_hi":
+                        y_drums_hi = arr
+                    else:
+                        y_bass_hi = arr
+            tm = tempo_map(
+                wav_path=str(wav), y_mix=y_mix_hi, y_drums=y_drums_hi,
+                y_bass=y_bass_hi, sr=grid_mod.TEMPO_SR, bpm=args.bpm,
+                first=analysis_first, beats_per_bar=args.beats_per_bar,
+                duration=duration, n_bars=grid.n_bars,
+                scan_lo=(args.tempo_scan_lo if args.tempo_scan_lo
+                         else grid_mod.TEMPO_SCAN_LO),
+                scan_hi=(args.tempo_scan_hi if args.tempo_scan_hi
+                         else grid_mod.TEMPO_SCAN_HI),
+                use_beat_this=not args.no_beat_this, use_librosa=True)
+            tm_verdict = tempo_map_verdict(tm)
+        except Exception as e:                       # 复核失败不得拖垮主管线
+            tm = {"available": False,
+                  "reason": f"tempo map 复核异常：{type(e).__name__}: {e}"}
+            tm_verdict = tm["reason"]
+        timings["tempo_map"] = time.time() - t0
+        print(f"[4b/8] tempo map（{timings['tempo_map']:.1f}s）：{tm_verdict}")
+        if tm.get("verdict") == "variable":
+            warnings.append("⚠️ tempo map 判为**变速**：" + tm_verdict
+                            + " 变速点与各段 BPM 见 song_analysis.json 的 "
+                              "`tempo_map.segments` / `bpm_changes` / `bar_start_table`，"
+                              "**必须人工确认后**再用 --bpm-changes 重跑。")
+            print("  " + warnings[-1])
+        elif tm.get("verdict") == "constant_other_bpm":
+            warnings.append("⚠️ tempo map：曲子速度是稳的，但**不等于用户给的 BPM**——"
+                            + tm_verdict)
+            print("  " + warnings[-1])
+        elif tm.get("verdict") == "undetermined":
+            warnings.append("⚠️ tempo map **无法判定** BPM 是否恒定：" + tm_verdict)
+            print("  " + warnings[-1])
+        if (tm.get("half_beat") or {}).get("verdict") == "first+half":
+            warnings.append(
+                f"⚠️ tempo map 的半拍归属指向 **first+半拍 = "
+                f"{tm['half_beat']['alt_first']:.4f}s**——当前 --first 可能整体错半拍。"
+                f"依据：{tm['half_beat']['reason']}")
+            print("  " + warnings[-1])
+    else:
+        timings["tempo_map"] = 0.0
+        print("[4b/8] 跳过 tempo map 复核")
 
     # ---- 5. onset / 鼓件 / VAD / 人声音高 ----
     t0 = time.time()
@@ -465,6 +532,8 @@ def run(args: argparse.Namespace) -> dict:
         "warnings": warnings,
         "offset_check": oc,
         "offset_verdict": verdict,
+        "tempo_map": tm,
+        "tempo_map_verdict": tm_verdict,
         "stems": {k: v for k, v in stem_info.items() if k != "stems"},
         "onset_tracks": {k: {"count": v.count, "heuristic": v.heuristic}
                          for k, v in tracks_map.items()},

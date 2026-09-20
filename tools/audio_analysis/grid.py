@@ -1,7 +1,46 @@
-"""拍网格构造与 offset 校验（纯 numpy，不依赖 librosa）。
+"""拍网格构造、offset 校验与 **tempo map 复核**。
 
 本模块**不做节拍追踪**：BPM 与 offset 由用户给定，网格由二者直接构造。
 `&first` 语义按 simai：谱面第 1 小节第 1 拍在音频中的秒数（可为负）。
+
+**依赖口径**：全部打分/统计函数是**纯 numpy**；只有三个直接吃波形的辅助函数
+（`high_res_onsets` / `band_flux` / `_beat_this_beats`）在函数体里**惰性** import
+librosa / beat_this，模块级仍然只依赖 numpy。
+
+---
+
+## v1.5（2026-09-20）：tempo map 复核换代（`tempo_map`）
+
+**被替换的旧做法**：`docs/audio-analysis.md` §2.4 第 5 步的「全曲按 8/16 小节分块、
+在 **32 分网格**（槽长 36.6 ms @205BPM、搜索半径 ±17 ms）上逐块求相位 φ_i，
+再对 (t_i, φ_i) 线性回归」。它有**两个致命盲点**，在 test-01 上被坐实：
+
+1. **对「整格错位」完全不敏感**。打分以一格为周期，半拍（146 ms）、16 分（73 ms）、
+   32 分（36.6 ms）在 32 分网格里**全部混叠成 0**。于是谱面整体错半拍、
+   中途插入一个 16 分的接缝、乐句错一格——这套复核一个都看不见。
+2. **测不出 >0.4% 的 BPM 误差**。一块 8 小节 ≈ 9.4 s，BPM 差 0.5% 就让相位在块内
+   绕过一整格，回归到的斜率是**绕圈后的残值**，看起来反而很小。
+   test-01 里「bars 73–80 +13.8 ms / bars 105–112 +15.0 ms 偏大」就是绕圈的痕迹，
+   换成 8 分量程后这两块是平的（+8.6…+10.3 / +9.9…+12.9 ms）。
+
+**新做法（本模块实现）**：
+
+- **BPM 走「无相位」滑窗全域扫描**（`window_bpm_scan`）：每个窗在 BPM 全域上
+  对**相位取最大**后打分，因此结论与相位无关，绕圈问题不存在；
+  再加**主体段高精度拟合**（`fine_bpm_fit`）与**前后半独立拟合一致性**
+  （`half_split_consistency`）。三者一致才判「恒定」。
+- **相位走 8 分量程**（`bar_phase_curve`，量程 ±半拍），能看见任何 ≥1 个 16 分的
+  离散跳格；`detect_phase_jumps` 专门找接缝。
+- **半拍归属**（`half_beat_attribution`）用**分带 flux**（kick/hat 对 bass），
+  而且**只在鼓最干净的小节上判**（`cleanest_drum_bars`）——全曲平均会被 drop 里
+  打满 8/16 分的 kick 抹平（test-01 全曲平均正/反比 1.00，干净段 2.14）。
+- **无鼓段不做 onset 验证**：旧的「无鼓段单独测相位 → 确认同一网格」**作废**
+  （实测该 onset 列表在混响 pad 上比随机还差：到最近 16 分线 |中位| 19.1 ms，
+  随机基线 9.1 ms）。这些段一律报 `unmeasurable`，按主体网格外推。
+- **beat_this 可选**（装了才跑），**librosa 路必须带 hop 帧量化告警**，
+  两者都只作旁证，不得单独作结论。
+
+判据与阈值见 `TEMPO_*` 常量。
 """
 
 from __future__ import annotations
@@ -448,3 +487,1324 @@ def offset_verdict(check: dict, tolerance_ms: float = 15.0,
         f"用户 first 与自动最佳偏移相差 {check['delta_ms']:+.1f} ms（>{decode_hint_ms:.0f}ms，"
         f"得分 {ratio:.2f}× 用户值），建议人工复核；{conf}{extra}。已按用户值构造网格。"
     )
+
+
+# =====================================================================
+# tempo map 复核（v1.5，替换旧的「8/16 小节块 + 32 分网格 ±17 ms」）
+# =====================================================================
+
+# --- 判据阈值（全部可由调用方覆盖）---
+TEMPO_SCAN_LO = 100.0            # 全域扫描下限（BPM）
+TEMPO_SCAN_HI = 260.0            # 全域扫描上限（BPM）
+TEMPO_COARSE_STEP = 0.25         # 一阶粗扫步长
+TEMPO_FINE_STEP = 0.02           # 二阶细扫步长（围绕粗扫峰 ±TEMPO_FINE_SPAN）
+TEMPO_FINE_SPAN = 1.5            # 二阶细扫半径（BPM）
+TEMPO_SIGMA_SEC = 0.012          # onset-fit 高斯核 σ
+TEMPO_N_PHASES_COARSE = 24       # 粗扫的相位格数
+TEMPO_N_PHASES_FINE = 128        # 细扫的相位格数
+TEMPO_WINDOW_BARS = (4, 2)       # 滑窗长度（小节），步长恒为 1 小节
+TEMPO_MIN_ONSETS_WINDOW = 6      # 一个窗至少要这么多 onset 才算有效
+TEMPO_CONST_TOL_BPM = 0.30       # 「落在中位 ±这个值」算同速
+TEMPO_CONST_HIT_RATIO = 0.90     # 有效窗里至少这个比例达标才判恒定
+TEMPO_HALF_SPLIT_TOL = 0.05      # 前后半独立拟合的允许差（BPM）
+TEMPO_SLOPE_GATE = 2e-4          # 相位回归斜率门槛（s/s），沿用旧口径
+TEMPO_JUMP_FRAC = 0.20           # 前后各 TEMPO_JUMP_WIN 小节的相位中位差 ≥ 这么多「格」判接缝
+TEMPO_JUMP_WIN = 3               # 接缝判定的前后窗口（小节）——单小节抖动不算接缝
+TEMPO_NO_DRUM_MIN_ONSETS = 3     # 一小节 drums onset 少于这个数 → 视为无鼓
+TEMPO_MEASURED_RATIO_GATE = 0.90 # 可测小节占比低于此值时，**禁止**报 constant（见 v1.5.1）
+TEMPO_CLEAN_BARS = 16            # 半拍归属取多少个「最干净」的小节
+TEMPO_CLEAN_KICK_LO = 3          # 干净小节的 kick 事件数下界（4-on-the-floor）
+TEMPO_CLEAN_KICK_HI = 5          # 上界（再多就是打满 8/16 分的 drop，不能用）
+TEMPO_ATTR_RATIO_GATE = 1.20     # 正/反拍能量比超过它才敢下半拍归属结论
+
+# 分带（Hz）：kick / hat 判拍相位，bass 只作反证（offbeat bass 是常见曲风特征）
+TEMPO_BANDS = {
+    "kick": (35.0, 120.0),
+    "snare": (180.0, 900.0),
+    "hat": (6000.0, 15000.0),
+    "bass": (30.0, 300.0),
+}
+
+
+# ---------- 纯 numpy 核心：onset-fit 打分 ----------
+
+def _fit_scores(rel_times: np.ndarray, weights: np.ndarray, periods: np.ndarray,
+                n_phases: int, sigma: float) -> tuple[np.ndarray, np.ndarray]:
+    """对每个候选周期，返回「相位取最大」后的加权命中得分与对应相位。
+
+    这是整套复核的地基：**得分对相位取过最大值，所以与相位无关**——
+    旧做法「固定相位/固定网格求残差」才会被整格错位与绕圈欺骗。
+
+    参数：
+        rel_times: onset 相对窗口起点的秒数（升序不必）
+        weights:   onset 权重（会被归一化到和为 1）
+        periods:   候选网格周期（秒）。拍格传 60/bpm，8 分格传 30/bpm
+        n_phases:  相位搜索格数（均匀覆盖一个周期）
+        sigma:     高斯核宽度（秒）——落在 ±σ 内算「命中」
+
+    返回 (scores, best_phase_sec)，长度都等于 len(periods)。
+    """
+    rel_times = np.asarray(rel_times, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    periods = np.asarray(periods, dtype=float)
+    if rel_times.size == 0 or periods.size == 0:
+        return np.zeros(periods.size), np.zeros(periods.size)
+    w = weights / (weights.sum() + 1e-12)
+    phases = (np.arange(n_phases, dtype=float) / n_phases)[None, :]
+    scores = np.empty(periods.size, dtype=float)
+    best_ph = np.empty(periods.size, dtype=float)
+    # 分块：把 (n_onset × n_period × n_phase) 的峰值内存压到 ~2e7 个元素
+    chunk = max(1, int(2e7 / max(rel_times.size * n_phases, 1)))
+    for c0 in range(0, periods.size, chunk):
+        per = periods[c0:c0 + chunk]
+        r = (rel_times[:, None] / per[None, :]) % 1.0          # (n, C)
+        d = np.abs(r[:, :, None] - phases[None, :, :])          # (n, C, P)
+        d = np.minimum(d, 1.0 - d) * per[None, :, None]         # 折成秒
+        sc = (w[:, None, None] * np.exp(-(d ** 2) / (2.0 * sigma ** 2))).sum(axis=0)
+        j = np.argmax(sc, axis=1)
+        scores[c0:c0 + chunk] = sc[np.arange(sc.shape[0]), j]
+        best_ph[c0:c0 + chunk] = j / n_phases * per
+        del r, d, sc
+    return scores, best_ph
+
+
+def fine_bpm_fit(onset_times, onset_weights, t_start: float, t_end: float,
+                 bpm_lo: float, bpm_hi: float, step: float = TEMPO_FINE_STEP,
+                 subdivision: int = 2, sigma: float = TEMPO_SIGMA_SEC,
+                 n_phases: int = TEMPO_N_PHASES_FINE,
+                 report_at: Sequence[float] = ()) -> dict:
+    """某一段上的高精度 BPM 拟合（相位无关）。
+
+    `subdivision=2` 表示拟合 **8 分格**（周期 30/bpm），这是音游曲最稳的口径；
+    `subdivision=1` 是拍格。`report_at` 里的 BPM 会额外回报其得分，
+    方便回答「@205 的得分是不是就等于峰值」。
+
+    返回 dict：`bpm` / `score` / `phase_sec` / `n` / `peak95_lo` / `peak95_hi`
+    （得分 ≥ 95% 峰值的 BPM 区间，等价于峰宽）/ `score_at`。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    w = (np.ones_like(t) if onset_weights is None
+         else np.asarray(onset_weights, dtype=float))
+    m = (t >= t_start) & (t < t_end)
+    if int(m.sum()) < 4 or bpm_hi < bpm_lo:
+        return {"available": False, "n": int(m.sum()),
+                "reason": "该段 onset 太少，无法拟合（无鼓段/渐弱段属正常）"}
+    bpms = np.arange(float(bpm_lo), float(bpm_hi) + 1e-9, float(step))
+    if bpms.size == 0:
+        bpms = np.array([float(bpm_lo)])
+    periods = (60.0 / bpms) / float(subdivision)
+    scores, phases = _fit_scores(t[m] - t_start, w[m], periods, n_phases, sigma)
+    i = int(np.argmax(scores))
+    lo_s = float(scores.min())
+    thr = scores[i] - (scores[i] - lo_s) * 0.05
+    ok = bpms[scores >= thr]
+    out = {
+        "available": True,
+        "bpm": float(bpms[i]),
+        "score": float(scores[i]),
+        "phase_sec": float(phases[i]),
+        "n": int(m.sum()),
+        "subdivision": int(subdivision),
+        "peak95_lo": float(ok.min()) if ok.size else float(bpms[i]),
+        "peak95_hi": float(ok.max()) if ok.size else float(bpms[i]),
+        "scan_lo": float(bpms[0]), "scan_hi": float(bpms[-1]), "step": float(step),
+    }
+    out["score_at"] = {f"{x:.3f}": float(scores[int(np.argmin(np.abs(bpms - x)))])
+                       for x in report_at}
+    return out
+
+
+def _two_stage_best(rel_t: np.ndarray, w: np.ndarray, subdivision: int,
+                    scan_lo: float, scan_hi: float, coarse_step: float,
+                    fine_step: float, fine_span: float, sigma: float) -> tuple[float, float]:
+    """粗扫全域 → 围绕粗峰细扫，返回 (best_bpm, best_score)。"""
+    coarse = np.arange(scan_lo, scan_hi + 1e-9, coarse_step)
+    sc, _ = _fit_scores(rel_t, w, (60.0 / coarse) / subdivision,
+                        TEMPO_N_PHASES_COARSE, sigma)
+    b0 = float(coarse[int(np.argmax(sc))])
+    fine = np.arange(max(scan_lo, b0 - fine_span), min(scan_hi, b0 + fine_span) + 1e-9,
+                     fine_step)
+    if fine.size == 0:
+        return b0, float(sc.max())
+    sc2, _ = _fit_scores(rel_t, w, (60.0 / fine) / subdivision,
+                         TEMPO_N_PHASES_FINE, sigma)
+    j = int(np.argmax(sc2))
+    return float(fine[j]), float(sc2[j])
+
+
+def window_bpm_scan(onset_times, onset_weights, bpm: float, first: float,
+                    beats_per_bar: int = 4, n_bars: int | None = None,
+                    duration: float | None = None,
+                    window_bars: int = 4, hop_bars: int = 1,
+                    scan_lo: float = TEMPO_SCAN_LO, scan_hi: float = TEMPO_SCAN_HI,
+                    coarse_step: float = TEMPO_COARSE_STEP,
+                    fine_step: float = TEMPO_FINE_STEP,
+                    fine_span: float = TEMPO_FINE_SPAN,
+                    subdivision: int = 2, sigma: float = TEMPO_SIGMA_SEC,
+                    local_span: float = 10.0,
+                    min_onsets: int = TEMPO_MIN_ONSETS_WINDOW) -> list[dict]:
+    """**无相位滑窗全域 BPM 扫描**（本模块的主判据）。
+
+    每个窗给两个数：
+    - `best`：在 [scan_lo, scan_hi] **全域**上的最佳 BPM（能看见半/倍速与跑飞）；
+    - `best_local`：限制在用户 BPM ±`local_span` 内的最佳 BPM（用来画曲线、判漂移）。
+
+    因为得分对相位取过最大值，**这条曲线与 `first` 无关**，
+    也就不会像旧的固定网格残差那样被整格错位骗过去。
+
+    窗长固定为 `window_bars` 小节、步长 `hop_bars` 小节（默认 1）。
+    onset 少于 `min_onsets` 的窗标 `valid=False`（无鼓段会大量落在这里，属正常）。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    w = (np.ones_like(t) if onset_weights is None
+         else np.asarray(onset_weights, dtype=float))
+    bar_sec = beats_per_bar * 60.0 / float(bpm)
+    if n_bars is None:
+        span = (duration if duration else (float(t.max()) if t.size else 0.0)) - first
+        n_bars = max(1, int(span / bar_sec))
+    out: list[dict] = []
+    for bar in range(1, int(n_bars) - int(window_bars) + 2, int(hop_bars)):
+        a = first + (bar - 1) * bar_sec
+        b = a + window_bars * bar_sec
+        m = (t >= a) & (t < b)
+        rec = {"bar": int(bar), "t": float(a), "window_bars": int(window_bars),
+               "n": int(m.sum())}
+        if int(m.sum()) < min_onsets:
+            rec.update({"valid": False, "best": None, "best_local": None,
+                        "score": None,
+                        "reason": "窗内 onset 不足（无鼓段/留白属正常，不作为变速证据）"})
+            out.append(rec)
+            continue
+        rel, ww = t[m] - a, w[m]
+        gb, gs = _two_stage_best(rel, ww, subdivision, scan_lo, scan_hi,
+                                 coarse_step, fine_step, fine_span, sigma)
+        lo = max(scan_lo, bpm - local_span)
+        hi = min(scan_hi, bpm + local_span)
+        loc = np.arange(lo, hi + 1e-9, fine_step)
+        sc, _ = _fit_scores(rel, ww, (60.0 / loc) / subdivision,
+                            TEMPO_N_PHASES_FINE, sigma)
+        j = int(np.argmax(sc))
+        rec.update({"valid": True, "best": gb, "score": gs,
+                    "best_local": float(loc[j]), "score_local": float(sc[j])})
+        out.append(rec)
+    return out
+
+
+def bar_phase_curve(onset_times, onset_weights, bpm: float, first: float,
+                    beats_per_bar: int = 4, n_bars: int | None = None,
+                    duration: float | None = None, subdivision: int = 2,
+                    min_onsets: int = 3) -> dict:
+    """**8 分量程**的逐小节相位曲线（加权圆均值）。
+
+    `subdivision=2` 指「一拍两格」，一格 = 一个 8 分 = 半拍，圆均值折到 ±半格，
+    所以**量程 = ±(15/bpm) 秒 = 205 BPM 下 ±73 ms**——正是旧做法
+    （32 分格、±17 ms）看不见的那一档。`subdivision=1`（拍格）量程翻倍到 ±146 ms。
+
+    返回 dict：`phase_sec`（每小节一个，无效为 nan）、`n`、`slope`（相位对时间的
+    线性回归斜率，s/s）、`bpm_from_slope`、`median_ms`、`std_ms`、`period_sec`。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    w = (np.ones_like(t) if onset_weights is None
+         else np.asarray(onset_weights, dtype=float))
+    bar_sec = beats_per_bar * 60.0 / float(bpm)
+    period = (60.0 / float(bpm)) / float(subdivision)
+    if n_bars is None:
+        span = (duration if duration else (float(t.max()) if t.size else 0.0)) - first
+        n_bars = max(1, int(span / bar_sec))
+    ph = np.full(int(n_bars), np.nan)
+    cnt = np.zeros(int(n_bars), dtype=int)
+    for i in range(int(n_bars)):
+        a = first + i * bar_sec
+        m = (t >= a) & (t < a + bar_sec)
+        cnt[i] = int(m.sum())
+        if cnt[i] < min_onsets:
+            continue
+        ang = 2.0 * np.pi * ((t[m] - first) % period) / period
+        z = (w[m] * np.exp(1j * ang)).sum() / (w[m].sum() + 1e-12)
+        ph[i] = float(np.angle(z)) / (2.0 * np.pi) * period
+    ok = ~np.isnan(ph)
+    tb = first + np.arange(int(n_bars)) * bar_sec
+    slope = float(np.polyfit(tb[ok], ph[ok], 1)[0]) if int(ok.sum()) >= 3 else float("nan")
+    return {
+        "phase_sec": ph, "n": cnt, "bar_times": tb, "valid_bars": int(ok.sum()),
+        "period_sec": float(period), "subdivision": int(subdivision),
+        "median_ms": float(np.nanmedian(ph) * 1000.0) if ok.any() else float("nan"),
+        "std_ms": float(np.nanstd(ph) * 1000.0) if ok.any() else float("nan"),
+        "slope": slope,
+        "bpm_from_slope": float(bpm * (1.0 - slope)) if slope == slope else float("nan"),
+        "slope_gate": TEMPO_SLOPE_GATE,
+        "range_ms": float(period * 500.0),
+        "note": "量程 ±半格；旧法用 32 分格（±17 ms），整格错位会被混叠成 0",
+    }
+
+
+def detect_phase_jumps(curve: dict, jump_frac: float = TEMPO_JUMP_FRAC,
+                       win: int = TEMPO_JUMP_WIN) -> list[dict]:
+    """在逐小节相位曲线里找**离散跳格**（接缝）。
+
+    这是旧做法**结构上无法发现**的一类故障：整体错半拍、中途插入一个 16 分、
+    乐句错一格——在 32 分网格上全部混叠成 0。
+
+    判据是「**持续的台阶**」而不是「相邻两小节的差」：拿候选接缝前 `win` 个
+    有效小节的相位中位数，跟后 `win` 个的中位数比，折到 ±半格后超过
+    `jump_frac` 个格才算。单小节的抖动（细分音密集、采样泄漏）不该算接缝——
+    test-01 里 bar43(−19 ms)→bar44(+27 ms) 的 46 ms 单点跳就是这种噪声，
+    用相邻差会误报，用中位台阶则正确地判为无接缝。
+
+    相邻的多个候选会合并成一条（一个接缝只报一次）。
+    """
+    ph = np.asarray(curve["phase_sec"], dtype=float)
+    period = float(curve["period_sec"])
+    tb = np.asarray(curve["bar_times"], dtype=float)
+    idx = np.flatnonzero(~np.isnan(ph))
+    raw: list[dict] = []
+    for k in range(1, idx.size):
+        a = idx[max(0, k - win):k]
+        b = idx[k:k + win]
+        if a.size < min(win, 2) or b.size < min(win, 2):
+            continue
+        d = float(np.median(ph[b]) - np.median(ph[a]))
+        d = (d + period / 2.0) % period - period / 2.0
+        if abs(d) >= jump_frac * period:
+            raw.append({"from_bar": int(idx[k - 1] + 1), "to_bar": int(idx[k] + 1),
+                        "t": float(tb[idx[k]]), "jump_ms": float(d * 1000.0),
+                        "jump_frac_of_slot": float(d / period)})
+    # 合并相邻候选：同一个接缝会在 win 个位置上连续触发，只保留幅度最大的那个
+    out: list[dict] = []
+    for j in raw:
+        if out and j["to_bar"] - out[-1]["to_bar"] <= win:
+            if abs(j["jump_ms"]) > abs(out[-1]["jump_ms"]):
+                out[-1] = j
+            continue
+        out.append(j)
+    return out
+
+
+def beat_residual_curve(onset_times, onset_weights, bpm: float, first: float,
+                        beats_per_bar: int = 4, duration: float | None = None,
+                        half_window_beats: float = 0.25) -> dict:
+    """**逐拍**残差（不是 8 小节块均值）：每条拍线取 ±`half_window_beats` 内最强的 onset。
+
+    这条曲线只用来画图与人工复核；判据以 `window_bpm_scan` 与 `bar_phase_curve` 为准。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    w = (np.ones_like(t) if onset_weights is None
+         else np.asarray(onset_weights, dtype=float))
+    order = np.argsort(t)
+    t, w = t[order], w[order]
+    spb = 60.0 / float(bpm)
+    end = duration if duration else (float(t.max()) if t.size else first)
+    n = max(0, int((end - first) / spb))
+    lines = first + np.arange(n) * spb
+    hw = half_window_beats * spb
+    res = np.full(n, np.nan)
+    lo = np.searchsorted(t, lines - hw)
+    hi = np.searchsorted(t, lines + hw)
+    for i in range(n):
+        if hi[i] > lo[i]:
+            k = lo[i] + int(np.argmax(w[lo[i]:hi[i]]))
+            res[i] = t[k] - lines[i]
+    ok = ~np.isnan(res)
+    return {"beat_times": lines, "residual_sec": res, "hit_ratio": float(ok.mean()) if n else 0.0,
+            "median_ms": float(np.nanmedian(res) * 1000.0) if ok.any() else float("nan"),
+            "mad_ms": float(np.nanmedian(np.abs(res - np.nanmedian(res))) * 1000.0)
+                      if ok.any() else float("nan")}
+
+
+def half_split_consistency(onset_times, onset_weights, t_start: float, t_end: float,
+                           bpm: float, span: float = 0.5,
+                           step: float = TEMPO_FINE_STEP, subdivision: int = 2,
+                           sigma: float = TEMPO_SIGMA_SEC) -> dict:
+    """把主体段一刀两半，各自独立拟合 BPM，看两半是否一致。
+
+    变速（哪怕只是缓慢漂移）一定让两半分开；恒定则两半在分辨率内重合。
+    """
+    mid = 0.5 * (t_start + t_end)
+    a = fine_bpm_fit(onset_times, onset_weights, t_start, mid,
+                     bpm - span, bpm + span, step, subdivision, sigma)
+    b = fine_bpm_fit(onset_times, onset_weights, mid, t_end,
+                     bpm - span, bpm + span, step, subdivision, sigma)
+    if not (a.get("available") and b.get("available")):
+        return {"available": False, "first_half": a, "second_half": b,
+                "reason": "有一半的 onset 太少"}
+    d = abs(a["bpm"] - b["bpm"])
+    return {"available": True, "first_half": a, "second_half": b,
+            "split_t": float(mid), "delta_bpm": float(d),
+            "tolerance": float(TEMPO_HALF_SPLIT_TOL),
+            "consistent": bool(d <= TEMPO_HALF_SPLIT_TOL)}
+
+
+# ---------- 吃波形的辅助（惰性 import librosa / beat_this）----------
+
+TEMPO_HOP = 128                  # 2.90 ms @44.1kHz —— 必须比 onsets.HOP(11.6ms) 细
+TEMPO_NFFT_ONSET = 512
+TEMPO_NFFT_BAND = 1024
+TEMPO_SR = 44100
+
+
+def high_res_onsets(y, sr: int = TEMPO_SR, hop: int = TEMPO_HOP,
+                    n_fft: int = TEMPO_NFFT_ONSET,
+                    fmin: float | None = None, fmax: float | None = None,
+                    delta: float = 0.05, wait_ms: float = 20.0) -> dict:
+    """高分辨率 onset 提取（hop=128 → 2.90 ms）。
+
+    ⚠️ **不要用 `onsets.HOP`（11.6 ms @22.05kHz）做 tempo 复核**：
+    那个量级和待测偏移同量级，会把答案磨平（`docs/audio-analysis.md` §2.4 已警示）。
+
+    返回 {"times", "weights", "env", "frame_times", "sr", "hop"}。
+    """
+    import librosa  # 惰性：让模块级保持纯 numpy
+    y = np.asarray(y, dtype=float)
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop, center=True))
+    if fmin is not None or fmax is not None:
+        fr = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+        lo = 0 if fmin is None else int(np.searchsorted(fr, fmin))
+        hi = len(fr) if fmax is None else int(np.searchsorted(fr, fmax))
+        S = S[lo:hi]
+    env = librosa.onset.onset_strength(S=librosa.amplitude_to_db(S, ref=np.max),
+                                       sr=sr, hop_length=hop, lag=2, aggregate=np.median)
+    ft = librosa.frames_to_time(np.arange(len(env)), sr=sr, hop_length=hop)
+    wait = max(1, int(round(wait_ms / 1000.0 * sr / hop)))
+    avg = max(1, int(0.10 * sr / hop))
+    idx = np.asarray(librosa.util.peak_pick(
+        env, pre_max=wait, post_max=wait, pre_avg=avg, post_avg=avg + 1,
+        delta=delta, wait=wait), dtype=int)
+    return {"times": ft[idx], "weights": env[idx], "env": env,
+            "frame_times": ft, "sr": int(sr), "hop": int(hop)}
+
+
+BAND_FLUX_FLOOR_DB = 40.0        # 见下：动态范围地板，防「静音带」上的假 flux
+
+
+def band_flux(y, sr: int = TEMPO_SR, f_lo: float = 35.0, f_hi: float = 120.0,
+              hop: int = TEMPO_HOP, n_fft: int = TEMPO_NFFT_BAND,
+              diff_frames: int = 1,
+              floor_rel_db: float = BAND_FLUX_FLOOR_DB) -> dict:
+    """分带能量的正向差分（dB/帧）——用来判 kick / hat / bass 落在哪条线上。
+
+    用**能量 dB 的差分**而不是线性幅度和：后者会被高频的 bin 数压倒
+    （5–16 kHz 占了大半个谱），把所有鼓件都判成 hat。
+
+    ⚠️ **必须有动态范围地板**（`floor_rel_db`，默认 40 dB）。
+    dB 差分在「这一带几乎没有能量」的时候会爆炸：实测一个 8 kHz 的 hat 泄漏到
+    35–120 Hz 只有 −0.9 dB（比 kick 低 46 dB），但因为该带底噪是 −81 dB，
+    **dB 上涨了 63.6 dB**，于是反拍上凭空多出一排「kick」。
+    真实曲子的 breakdown / 低通渐弱段同理会造出幻影瞬态。
+    做法：把能量曲线在 `p99 − floor_rel_db` 处截断再差分。
+    """
+    import librosa  # 惰性
+    y = np.asarray(y, dtype=float)
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop, center=True)) ** 2
+    fr = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    lo, hi = int(np.searchsorted(fr, f_lo)), int(np.searchsorted(fr, f_hi))
+    e = librosa.power_to_db(S[max(lo, 0):max(hi, lo + 1)].sum(axis=0) + 1e-12)
+    if floor_rel_db and floor_rel_db > 0 and e.size:
+        e = np.maximum(e, float(np.percentile(e, 99)) - float(floor_rel_db))
+    d = int(max(1, diff_frames))
+    fl = np.concatenate([np.zeros(d), np.maximum(0.0, e[d:] - e[:-d])])
+    ft = librosa.frames_to_time(np.arange(len(fl)), sr=sr, hop_length=hop)
+    return {"flux": fl, "energy_db": e, "frame_times": ft,
+            "floor_rel_db": float(floor_rel_db)}
+
+
+def sample_flux_at(flux, frame_times, times, half_window: float = 0.030) -> np.ndarray:
+    """在给定秒数附近取 flux 的局部最大（容忍检测器的几毫秒抖动）。"""
+    flux = np.asarray(flux, dtype=float)
+    frame_times = np.asarray(frame_times, dtype=float)
+    times = np.asarray(times, dtype=float)
+    lo = np.searchsorted(frame_times, times - half_window)
+    hi = np.searchsorted(frame_times, times + half_window)
+    out = np.zeros(times.size)
+    for i in range(times.size):
+        if hi[i] > lo[i]:
+            out[i] = float(flux[lo[i]:hi[i]].max())
+    return out
+
+
+def cleanest_drum_bars(kick_flux, frame_times, bpm: float, first: float,
+                       beats_per_bar: int = 4, n_bars: int = 0,
+                       want: int = TEMPO_CLEAN_BARS,
+                       lo_hits: int = TEMPO_CLEAN_KICK_LO,
+                       hi_hits: int = TEMPO_CLEAN_KICK_HI,
+                       delta_db: float = 4.0,
+                       rel_frac: float = 0.40,
+                       beat_tol: float = 0.25) -> list[int]:
+    """挑出「鼓最干净」的小节——**判半拍归属只能在这些小节上做**。
+
+    判据是 **grid 无关** 的：数这一小节里 kick 的击打次数，只保留
+    `lo_hits ≤ n ≤ hi_hits`（默认 3–5，即接近 4-on-the-floor）的小节，
+    再按 kick 总能量从高到低取前 `want` 个。
+
+    光数「几下」还不够：drop 里挑出的 3–5 下可能是 16 分连打里最响的几下
+    （test-01 的 bar22 实测击打间隔是 0.40/0.36/0.44/0.21 拍）。
+    所以还要求**击打间隔本身接近一拍**：中位间隔落在 1±`beat_tol` 拍内，
+    且至少 n−2 个间隔也落在这个范围。这一条只用到**拍的周期**、
+    完全不用拍的**相位**，所以不会偏袒 `first` 或 `first+半拍` 中的任何一个。
+
+    为什么必须这么挑：drop 段的 kick 会打满 8 分甚至 16 分，正拍与反拍都有货，
+    **全曲平均出来的正/反比会被抹平到 1.00**（test-01 实测：全曲 1.03，
+    按本函数挑出的干净小节 2.32）——这正是上一轮把半拍归属判成「分不开」的根源。
+    """
+    flux = np.asarray(kick_flux, dtype=float)
+    ft = np.asarray(frame_times, dtype=float)
+    bar_sec = beats_per_bar * 60.0 / float(bpm)
+    if n_bars <= 0:
+        n_bars = max(1, int((float(ft[-1]) - first) / bar_sec)) if ft.size else 0
+    min_gap = int(max(1, 0.045 * (len(ft) / max(ft[-1], 1e-9)))) if ft.size else 1
+    cand: list[tuple[float, int]] = []
+    for b in range(1, int(n_bars) + 1):
+        a = first + (b - 1) * bar_sec
+        i0, i1 = int(np.searchsorted(ft, a)), int(np.searchsorted(ft, a + bar_sec))
+        if i1 - i0 < 8:
+            continue
+        seg = flux[i0:i1]
+        # 峰计数：既要过绝对门 `delta_db`，也要 ≥ 本小节最大 flux 的 `rel_frac`
+        # （绝对门单独用不行——曲子各段电平差很远；相对门单独用也不行——
+        #   安静小节里的噪声会被当成 4 个击打）
+        thr = max(float(delta_db), float(rel_frac) * float(seg.max()))
+        hits, last, pos = 0, -10 ** 9, []
+        for k in range(len(seg)):
+            if seg[k] < thr:
+                continue
+            a0, a1 = max(0, k - min_gap), min(len(seg), k + min_gap + 1)
+            if seg[k] >= seg[a0:a1].max() and k - last > min_gap:
+                hits += 1
+                last = k
+                pos.append(float(ft[i0 + k]))
+        if not (lo_hits <= hits <= hi_hits) or len(pos) < 2:
+            continue
+        iv = np.diff(np.asarray(pos, dtype=float))          # 相邻击打的间隔（秒）
+        spb = 60.0 / float(bpm)
+        near = np.abs(iv / spb - 1.0) <= beat_tol
+        if not (abs(float(np.median(iv)) / spb - 1.0) <= beat_tol
+                and int(near.sum()) >= max(1, hits - 2)):
+            continue
+        cand.append((float(near.mean()), float(seg.sum()), b))
+    cand.sort(reverse=True)
+    return sorted(b for _, _, b in cand[:want])
+
+
+def half_beat_attribution(band_fluxes: dict, frame_times, bpm: float, first: float,
+                          bars: Sequence[int], beats_per_bar: int = 4,
+                          half_window: float = 0.030,
+                          ratio_gate: float = TEMPO_ATTR_RATIO_GATE) -> dict:
+    """**半拍归属**：`first` 到底是拍线，还是差半拍的那条反拍线？
+
+    对每个频带，比较 `first` 的整拍线与 `first + 半拍` 的线上的平均 flux。
+
+    - **kick 与 hat 说了算**：这两件几乎总在拍上（4-on-the-floor + 8 分 hat）；
+    - **bass 只作反证**：很多曲风（本曲即是）用 **offbeat bass**——
+      kick 在拍上、bass stab 在 8 分反拍上。bass 指向反拍**不是**反例，
+      反而是 kick 判定正确的佐证；因此 bass 不参与投票，只写进理由。
+
+    返回 dict：逐带的 `on` / `off` / `ratio`，`verdict`（"first" / "first+half" /
+    "undecided"）、`alt_first`、`reason`。
+    """
+    ft = np.asarray(frame_times, dtype=float)
+    spb = 60.0 / float(bpm)
+    bar_sec = beats_per_bar * spb
+    lines = np.concatenate([[first + (b - 1) * bar_sec + k * spb
+                             for k in range(int(beats_per_bar))] for b in bars]) \
+        if len(bars) else np.zeros(0)
+    per_band: dict[str, dict] = {}
+    for name, fl in band_fluxes.items():
+        if lines.size == 0:
+            per_band[name] = {"on": 0.0, "off": 0.0, "ratio": float("nan"), "n": 0}
+            continue
+        on = float(sample_flux_at(fl, ft, lines, half_window).mean())
+        off = float(sample_flux_at(fl, ft, lines + spb / 2.0, half_window).mean())
+        per_band[name] = {"on": on, "off": off,
+                          "ratio": float(on / off) if off > 1e-9 else float("inf"),
+                          "n": int(lines.size)}
+    votes_on = [n for n in ("kick", "hat")
+                if n in per_band and per_band[n]["ratio"] >= ratio_gate]
+    votes_off = [n for n in ("kick", "hat")
+                 if n in per_band and per_band[n]["ratio"] <= 1.0 / ratio_gate]
+    if votes_on and not votes_off:
+        verdict = "first"
+    elif votes_off and not votes_on:
+        verdict = "first+half"
+    else:
+        verdict = "undecided"
+    bass = per_band.get("bass")
+    bass_note = ""
+    if bass and bass["ratio"] == bass["ratio"]:
+        if verdict == "first" and bass["ratio"] <= 1.0 / ratio_gate:
+            bass_note = ("；bass 指向反拍（比 %.2f）——这是 **offbeat bass** 曲风特征"
+                         "（kick 在拍上、bass stab 在 8 分反拍上），不是反例"
+                         % bass["ratio"])
+        elif verdict == "first+half" and bass["ratio"] >= ratio_gate:
+            bass_note = "；bass 指向原 first 线，同样可用 offbeat bass 解释"
+    detail = "，".join(f"{k} 正/反 {v['on']:.2f}/{v['off']:.2f} dB（比 {v['ratio']:.2f}）"
+                      for k, v in per_band.items())
+    return {
+        "available": bool(len(bars)),
+        "bands": per_band,
+        "bars_used": [int(b) for b in bars],
+        "n_bars_used": int(len(bars)),
+        "ratio_gate": float(ratio_gate),
+        "verdict": verdict,
+        "alt_first": float(first + spb / 2.0),
+        "half_beat_ms": float(spb * 500.0),
+        "reason": (f"只在 {len(bars)} 个鼓最干净的小节上判（4-on-the-floor 档，"
+                   f"不用全曲平均）：{detail}{bass_note}"),
+    }
+
+
+def _beat_this_beats(wav_path: str, device: str = "mps",
+                     checkpoint: str = "final0") -> dict:
+    """beat_this（MIT）拍点/下拍——**可选**路，没装就如实回报，不抛异常。"""
+    try:
+        from beat_this.inference import File2Beats  # 惰性、可选
+    except Exception as e:                                   # pragma: no cover
+        return {"available": False,
+                "reason": f"beat_this 未安装（{type(e).__name__}）；"
+                          f"`pip install beat-this` 后可用，dbn=True 另需 madmom"}
+    last = "未知错误"
+    for dev in (device, "cpu"):
+        try:
+            beats, downbeats = File2Beats(checkpoint_path=checkpoint, device=dev,
+                                          dbn=False)(wav_path)
+            return {"available": True, "device": dev,
+                    "beats": np.asarray(beats, dtype=float),
+                    "downbeats": np.asarray(downbeats, dtype=float),
+                    "quantization_note": "beat_this 输出量化到 10 ms，"
+                                         "逐间隔求 BPM 会有 ±7 BPM 锯齿，须滑动拟合"}
+        except Exception as e:                               # pragma: no cover
+            last = f"{type(e).__name__}: {e}"
+    return {"available": False, "reason": f"beat_this 运行失败：{last}"}
+
+
+def _librosa_beats(y, sr: int, start_bpm: float, hop: int = 512) -> dict:
+    """librosa 拍点——**必须带 hop 帧量化告警**，不得单独作结论。"""
+    try:
+        import librosa  # 惰性
+        env = librosa.onset.onset_strength(y=np.asarray(y, dtype=float), sr=sr,
+                                           hop_length=hop, aggregate=np.median)
+        tempo, beats = librosa.beat.beat_track(
+            onset_envelope=env, sr=sr, hop_length=hop, start_bpm=float(start_bpm),
+            tightness=400, units="time", trim=False)
+    except Exception as e:                                   # pragma: no cover
+        return {"available": False, "reason": f"librosa 拍点失败：{type(e).__name__}: {e}"}
+    frame_ms = hop / sr * 1000.0
+    n = max(1.0, round(60.0 / float(start_bpm) / (hop / sr)))
+    quant = 60.0 / (n * hop / sr)
+    return {
+        "available": True, "tempo": float(np.atleast_1d(tempo)[0]),
+        "beats": np.asarray(beats, dtype=float), "hop": int(hop),
+        "frame_ms": float(frame_ms),
+        "quantized_bpm_near_user": float(quant),
+        "warning": (f"⚠️ librosa `beat_track` 的 tempo 被 hop={hop} 的帧栅格量化："
+                    f"一帧 {frame_ms:.2f} ms，用户 BPM 附近只能取到 {quant:.3f}。"
+                    f"**这个数不是真值，不得单独作结论**；拍点本身仍可用来看相位。"),
+    }
+
+
+def instantaneous_bpm(beat_times, expect_bpm: float, window: int = 17,
+                      subdivision: int = 2) -> dict:
+    """拍点序列 → 逐拍瞬时 BPM（滑动线性拟合，抗输出量化）。
+
+    先把相邻间隔折算成「最近的整数个 1/subdivision 拍」，再在 `window` 个拍点上
+    做线性拟合取斜率。直接用相邻间隔求 BPM 会被 beat_this 的 10 ms 输出栅格
+    打成 ±7 BPM 的锯齿（test-01 实测），**必须滑动拟合**。
+    """
+    t = np.asarray(sorted(np.asarray(beat_times, dtype=float)))
+    if t.size < max(8, window // 2):
+        return {"available": False, "reason": "拍点太少"}
+    unit = 60.0 / float(expect_bpm) / float(subdivision)
+    k = np.maximum(1.0, np.round(np.diff(t) / unit))
+    idx = np.concatenate([[0.0], np.cumsum(k)])
+    bpm = np.full(t.size, np.nan)
+    for i in range(t.size):
+        a, b = max(0, i - window // 2), min(t.size, i + window // 2 + 1)
+        if b - a >= 8 and idx[b - 1] - idx[a] > 4:
+            slope = float(np.polyfit(idx[a:b], t[a:b], 1)[0])
+            if slope > 1e-9:
+                bpm[i] = 60.0 / (slope * float(subdivision))
+    ok = ~np.isnan(bpm)
+    if not ok.any():
+        return {"available": False, "reason": "滑动拟合无有效点"}
+    return {"available": True, "times": t[ok], "bpm": bpm[ok],
+            "median": float(np.median(bpm[ok])),
+            "p5": float(np.percentile(bpm[ok], 5)),
+            "p95": float(np.percentile(bpm[ok], 95)),
+            "off_by_1p5_ratio": float(np.mean(np.abs(bpm[ok] - expect_bpm) > 1.5))}
+
+
+# ---------- 变速分段（判为变速时才用）----------
+
+def segment_tempo(windows: Sequence[dict], bpm: float, first: float,
+                  beats_per_bar: int = 4, tol: float = TEMPO_CONST_TOL_BPM,
+                  min_run: int = 4) -> list[dict]:
+    """把逐窗 BPM 曲线切成若干个「常速段」，输出 `(bpm)` 标记序列的素材。
+
+    做法刻意简单（中值平滑 + 贪心聚段 + 丢掉过短的段），因为一旦判为变速，
+    **精确变速点必须人工确认**；本函数只给候选。
+
+    返回 [{start_bar, end_bar, bpm, n_windows}]。
+    """
+    vals = [(w["bar"], w["best_local"]) for w in windows
+            if w.get("valid") and w.get("best_local") is not None]
+    if len(vals) < min_run:
+        return []
+    bars = np.array([v[0] for v in vals])
+    y = np.array([v[1] for v in vals], dtype=float)
+    # 中值平滑（长度 5，纯 numpy）
+    k = 5
+    pad = np.pad(y, (k // 2, k // 2), mode="edge")
+    ys = np.array([np.median(pad[i:i + k]) for i in range(y.size)])
+    segs: list[dict] = []
+    s = 0
+    for i in range(1, ys.size + 1):
+        if i == ys.size or abs(ys[i] - np.median(ys[s:i])) > tol:
+            segs.append({"start_bar": int(bars[s]), "end_bar": int(bars[i - 1]),
+                         "bpm": float(np.median(ys[s:i])), "n_windows": int(i - s)})
+            s = i
+    segs = [g for g in segs if g["n_windows"] >= min_run]
+    # 相邻同速段合并
+    merged: list[dict] = []
+    for g in segs:
+        if merged and abs(merged[-1]["bpm"] - g["bpm"]) <= tol:
+            merged[-1]["end_bar"] = g["end_bar"]
+            merged[-1]["n_windows"] += g["n_windows"]
+            continue
+        merged.append(dict(g))
+    return merged
+
+
+def bpm_changes_from_segments(segments: Sequence[dict], base_bpm: float,
+                              decimals: int = 2) -> list[BpmChange]:
+    """常速段列表 → `BpmChange`（可直接喂 `Grid` / 写成 simai `(bpm)` 标记）。"""
+    out: list[BpmChange] = []
+    prev = round(float(base_bpm), decimals)
+    for g in segments:
+        b = round(float(g["bpm"]), decimals)
+        if g["start_bar"] > 1 and abs(b - prev) > 10.0 ** (-decimals):
+            out.append(BpmChange(bar=int(g["start_bar"]), bpm=b))
+            prev = b
+    return out
+
+
+def bar_start_table(bpm: float, first: float, beats_per_bar: int = 4,
+                    bpm_changes: Sequence[BpmChange] = (), n_bars: int = 128) -> list[dict]:
+    """按（可能变速的）tempo map 重算 1..n_bars 的小节起点秒。"""
+    t = float(first)
+    cur = float(bpm)
+    cmap = {c.bar: float(c.bpm) for c in bpm_changes}
+    rows: list[dict] = []
+    for bar in range(1, int(n_bars) + 1):
+        if bar in cmap:
+            cur = cmap[bar]
+        rows.append({"bar": bar, "start_sec": round(t, 4), "bpm": cur})
+        t += beats_per_bar * 60.0 / cur
+    return rows
+
+
+# ---------- 总装 ----------
+
+def tempo_map(wav_path: str | None = None, *, y_mix=None, y_drums=None, y_bass=None,
+              sr: int = TEMPO_SR, bpm: float = 0.0, first: float = 0.0,
+              beats_per_bar: int = 4, duration: float | None = None,
+              body_range: tuple[float, float] | None = None,
+              scan_lo: float = TEMPO_SCAN_LO, scan_hi: float = TEMPO_SCAN_HI,
+              coarse_step: float = TEMPO_COARSE_STEP,
+              fine_step: float = TEMPO_FINE_STEP,
+              window_bars: Sequence[int] = TEMPO_WINDOW_BARS,
+              use_beat_this: bool = True, use_librosa: bool = True,
+              beat_this_device: str = "mps",
+              n_bars: int | None = None) -> dict:
+    """**tempo map 复核总装**：恒定 / 变速判定 + 半拍归属 + 无鼓段标注。
+
+    输入（三选一，优先级从上到下）：
+      - `y_drums` + `y_mix`：已解码的单声道波形（推荐，管线里 stems 已经有了）；
+      - `y_mix` 单独给：全混回退，结论置信度自动降一档；
+      - `wav_path`：自己读（只在没给波形时）。
+
+    判「恒定」需要**三条同时成立**：
+      ① 有效窗里 ≥`TEMPO_CONST_HIT_RATIO` 落在逐窗中位 ±`TEMPO_CONST_TOL_BPM`；
+      ② 主体段高精度拟合的峰落在用户 BPM ±`TEMPO_CONST_TOL_BPM`；
+      ③ 前后半独立拟合差 ≤ `TEMPO_HALF_SPLIT_TOL`。
+    另外相位曲线不得有跳格（`detect_phase_jumps` 为空）且回归斜率过门槛。
+
+    返回一个可直接塞进 `song_analysis.json` 的 dict（见 `verdict` / `bpm` /
+    `windows` / `phase` / `half_beat` / `no_drum_bars` / `cross_check`）。
+    """
+    import numpy as _np  # 局部别名，避免与调用方的 np 混淆
+    notes: list[str] = []
+    if bpm <= 0:
+        raise ValueError("tempo_map 需要用户给定的 bpm")
+    bar_sec = beats_per_bar * 60.0 / float(bpm)
+
+    # --- 1. 取波形 ---
+    if y_mix is None and wav_path:
+        import librosa  # 惰性
+        y_mix, sr = librosa.load(str(wav_path), sr=TEMPO_SR, mono=True)
+    if y_mix is None and y_drums is None:
+        return {"available": False, "reason": "既没有波形也没有 wav_path"}
+
+    primary_name = "drums" if y_drums is not None else "mix"
+    if y_drums is None:
+        notes.append("⚠️ 没有 drums stem，退回全混：全混 onset 在混响 pad / 渐弱段上"
+                     "噪声很大，逐窗曲线的离散度不可当变速证据。")
+
+    if duration is None:
+        ref = y_drums if y_drums is not None else y_mix
+        duration = float(len(ref)) / float(sr)
+    if n_bars is None:
+        n_bars = max(1, int((duration - first) / bar_sec))
+
+    # --- 2. 高分辨率 onset（主 = drums，辅 = 全混带通）---
+    o_main = high_res_onsets(y_drums if y_drums is not None else y_mix, sr=sr)
+    o_mix = high_res_onsets(y_mix, sr=sr, fmin=60.0, fmax=6000.0) if y_mix is not None else None
+
+    # --- 3. 无鼓段标注（这些小节一律不做 onset 验证）---
+    tt = o_main["times"]
+    per_bar = _np.array([int(((tt >= first + i * bar_sec) &
+                              (tt < first + (i + 1) * bar_sec)).sum())
+                         for i in range(int(n_bars))])
+    no_drum = [int(i + 1) for i in range(int(n_bars))
+               if per_bar[i] < TEMPO_NO_DRUM_MIN_ONSETS]
+    if no_drum:
+        notes.append(f"{len(no_drum)}/{n_bars} 小节判为无鼓/无瞬态，**不做 onset 验证**"
+                     f"（旧版的「无鼓段单独测相位 → 确认同一网格」已作废："
+                     f"那条 onset 列表在混响 pad 上比随机还差）。这些小节按主体网格外推。")
+
+    # --- 4. 主体段（连续的有鼓区间，用来做高精度拟合）---
+    if body_range is None:
+        has = _np.flatnonzero(per_bar >= TEMPO_NO_DRUM_MIN_ONSETS)
+        if has.size >= 8:
+            body_range = (float(first + has[0] * bar_sec),
+                          float(first + (has[-1] + 1) * bar_sec))
+        else:
+            body_range = (float(first), float(first + n_bars * bar_sec))
+    body = fine_bpm_fit(o_main["times"], o_main["weights"], body_range[0], body_range[1],
+                        max(scan_lo, bpm - 5.0), min(scan_hi, bpm + 5.0), fine_step,
+                        subdivision=2, report_at=(bpm,))
+    # 一致性检验要围绕**实测**的 BPM 做：用户值错了的时候，
+    # 围绕用户值的窄窗会把两半都顶到窗边，检验就失去意义。
+    split_center = body["bpm"] if body.get("available") else bpm
+    split = half_split_consistency(o_main["times"], o_main["weights"],
+                                   body_range[0], body_range[1], split_center)
+
+    # --- 5. 无相位滑窗全域扫描 ---
+    windows: dict[str, list[dict]] = {}
+    for wb in window_bars:
+        windows[f"{wb}bar"] = window_bpm_scan(
+            o_main["times"], o_main["weights"], bpm=bpm, first=first,
+            beats_per_bar=beats_per_bar, n_bars=n_bars, window_bars=int(wb),
+            scan_lo=scan_lo, scan_hi=scan_hi, coarse_step=coarse_step,
+            fine_step=fine_step)
+    if o_mix is not None and primary_name == "drums":
+        windows["4bar_mix"] = window_bpm_scan(
+            o_mix["times"], o_mix["weights"], bpm=bpm, first=first,
+            beats_per_bar=beats_per_bar, n_bars=n_bars, window_bars=4,
+            scan_lo=scan_lo, scan_hi=scan_hi, coarse_step=coarse_step,
+            fine_step=fine_step)
+
+    ref = windows.get(f"{window_bars[0]}bar", [])
+    loc = _np.array([w["best_local"] for w in ref if w.get("valid")], dtype=float)
+    stats = {}
+    if loc.size:
+        med = float(_np.median(loc))
+        hit = float(_np.mean(_np.abs(loc - med) <= TEMPO_CONST_TOL_BPM))
+        stats = {"n_valid": int(loc.size), "n_windows": len(ref),
+                 "median": med, "mean": float(loc.mean()), "std": float(loc.std()),
+                 "min": float(loc.min()), "max": float(loc.max()),
+                 "hit_ratio_within_tol": hit,
+                 "hit_ratio_around_user": float(_np.mean(
+                     _np.abs(loc - bpm) <= TEMPO_CONST_TOL_BPM))}
+
+    # --- 6. 相位（8 分量程）与跳格 ---
+    phase = bar_phase_curve(o_main["times"], o_main["weights"], bpm=bpm, first=first,
+                            beats_per_bar=beats_per_bar, n_bars=n_bars, subdivision=2)
+    jumps = detect_phase_jumps(phase)
+    residual = beat_residual_curve(o_main["times"], o_main["weights"], bpm=bpm,
+                                   first=first, beats_per_bar=beats_per_bar,
+                                   duration=duration)
+
+    # --- 7. 半拍归属（只在鼓最干净的小节上判）---
+    half = {"available": False, "reason": "没有 drums stem，半拍归属不判（全混分不开鼓件）"}
+    if y_drums is not None:
+        fl = {n: band_flux(y_drums if n != "bass" else (y_bass if y_bass is not None else y_mix),
+                           sr=sr, f_lo=lo_, f_hi=hi_)
+              for n, (lo_, hi_) in TEMPO_BANDS.items()
+              if n != "bass" or (y_bass is not None or y_mix is not None)}
+        ft = fl["kick"]["frame_times"]
+        clean = cleanest_drum_bars(fl["kick"]["flux"], ft, bpm=bpm, first=first,
+                                   beats_per_bar=beats_per_bar, n_bars=int(n_bars))
+        if clean:
+            half = half_beat_attribution({k: v["flux"] for k, v in fl.items()}, ft,
+                                         bpm=bpm, first=first, bars=clean,
+                                         beats_per_bar=beats_per_bar)
+        else:
+            half = {"available": False,
+                    "reason": f"找不到 kick 打 {TEMPO_CLEAN_KICK_LO}–{TEMPO_CLEAN_KICK_HI} "
+                              f"下的干净小节（全曲要么无鼓要么 kick 打满）；"
+                              f"**不在全曲平均上硬判**"}
+
+    # --- 8. 旁证：beat_this / librosa ---
+    cross: dict[str, dict] = {}
+    if use_beat_this:
+        bt = _beat_this_beats(str(wav_path), device=beat_this_device) if wav_path else \
+            {"available": False, "reason": "需要 wav_path 才能跑 beat_this"}
+        if bt.get("available"):
+            bt["instantaneous"] = instantaneous_bpm(bt["beats"], bpm)
+            bt["beats"] = bt["beats"].tolist()
+            bt["downbeats"] = bt["downbeats"].tolist()
+            inst = bt["instantaneous"]
+            if inst.get("available"):
+                inst["times"] = inst["times"].tolist()
+                inst["bpm"] = inst["bpm"].tolist()
+        cross["beat_this"] = bt
+    else:
+        cross["beat_this"] = {"available": False, "reason": "调用方关闭（--no-beat-this）"}
+    if use_librosa and y_mix is not None:
+        lb = _librosa_beats(y_mix, sr=sr, start_bpm=bpm)
+        if lb.get("available"):
+            lb["instantaneous"] = instantaneous_bpm(lb["beats"], bpm)
+            lb["beats"] = lb["beats"].tolist()
+            inst = lb["instantaneous"]
+            if inst.get("available"):
+                inst["times"] = inst["times"].tolist()
+                inst["bpm"] = inst["bpm"].tolist()
+        cross["librosa"] = lb
+    cross["note"] = ("beat_this 与 librosa 都只作**旁证**：前者输出量化到 10 ms，"
+                     "后者 tempo 被 hop 帧栅格量化，**任何一条都不得单独作结论**。")
+
+    # --- 9. 判定 ---
+    c1 = bool(stats) and stats["hit_ratio_within_tol"] >= TEMPO_CONST_HIT_RATIO
+    c2 = bool(body.get("available")) and abs(body["bpm"] - bpm) <= TEMPO_CONST_TOL_BPM
+    c3 = bool(split.get("consistent"))
+    c4 = not jumps
+    slope = phase.get("slope", float("nan"))
+    c5 = (slope != slope) or abs(slope) < TEMPO_SLOPE_GATE
+    constant = c1 and c2 and c3 and c4 and c5
+    criteria = {
+        "windows_within_tol": {"pass": bool(c1),
+                               "value": stats.get("hit_ratio_within_tol"),
+                               "gate": TEMPO_CONST_HIT_RATIO},
+        "body_fit_matches_user": {"pass": bool(c2), "value": body.get("bpm"),
+                                  "gate": TEMPO_CONST_TOL_BPM},
+        "half_split_consistent": {"pass": bool(c3), "value": split.get("delta_bpm"),
+                                  "gate": TEMPO_HALF_SPLIT_TOL},
+        "no_phase_jump": {"pass": bool(c4), "value": len(jumps)},
+        "phase_slope_ok": {"pass": bool(c5), "value": slope, "gate": TEMPO_SLOPE_GATE},
+    }
+
+    segments: list[dict] = []
+    changes: list[BpmChange] = []
+    table: list[dict] = []
+    if not constant and ref:
+        segments = segment_tempo(ref, bpm=bpm, first=first, beats_per_bar=beats_per_bar)
+        changes = bpm_changes_from_segments(segments, base_bpm=(
+            segments[0]["bpm"] if segments else bpm))
+        table = bar_start_table(
+            bpm=(segments[0]["bpm"] if segments else bpm), first=first,
+            beats_per_bar=beats_per_bar, bpm_changes=changes, n_bars=int(n_bars))
+
+    # 「曲子本身恒定，但不等于用户给的 BPM」要单独成一档——
+    # 这正是旧法（32 分网格块相位回归）完全测不出的那类错误：
+    # 差 0.5% 时一块之内相位就绕过一整格，回归斜率看起来反而很小。
+    detected = body.get("bpm") if body.get("available") else None
+    constant_elsewhere = (
+        not constant and c1 and c3 and detected is not None
+        and abs(detected - bpm) > TEMPO_CONST_TOL_BPM
+        and abs(float(stats.get("median", detected)) - detected) <= TEMPO_CONST_TOL_BPM)
+    # v1.5.1（test-01 事故）：**可测小节占比不够时不得报 constant**。
+    # 旧行为把「无鼓段测不到」直接当成「无鼓段也是这个速度」外推，
+    # 结果把一首前奏 9 小节 195 BPM、尾奏 7 小节 221→108 的曲子判成「全曲恒定 205」。
+    measured_ratio = 1.0 - (len(no_drum) / max(int(n_bars), 1))
+    enough_measured = measured_ratio >= TEMPO_MEASURED_RATIO_GATE
+    if constant and not enough_measured:
+        constant = False
+        constant_in_measured = True
+    else:
+        constant_in_measured = False
+    if constant:
+        verdict = "constant"
+    elif constant_in_measured:
+        verdict = "constant_in_measured"
+    elif constant_elsewhere:
+        verdict = "constant_other_bpm"
+    elif segments and len(segments) >= 2:
+        verdict = "variable"
+    else:
+        verdict = "undetermined"
+    drift_ms = (abs((detected or bpm) - bpm) / bpm * (duration - first) * 1000.0
+                if detected else 0.0)
+
+    return _json_safe({
+        "available": True,
+        "version": "1.5",
+        "verdict": verdict,
+        "user_bpm": float(bpm), "user_first": float(first),
+        "detected_bpm": detected,
+        "drift_vs_user_ms": float(drift_ms),
+        "beats_per_bar": int(beats_per_bar), "n_bars": int(n_bars),
+        "primary_source": primary_name,
+        "body_range_sec": [float(body_range[0]), float(body_range[1])],
+        "body_fit": body, "half_split": split,
+        "window_stats": stats, "windows": windows,
+        "phase": {k: (v.tolist() if isinstance(v, _np.ndarray) else v)
+                  for k, v in phase.items()},
+        "phase_jumps": jumps,
+        "beat_residual": {k: (v.tolist() if isinstance(v, _np.ndarray) else v)
+                          for k, v in residual.items()},
+        "half_beat": half,
+        "no_drum_bars": no_drum,
+        "no_drum_policy": "无鼓段不做 onset 验证，按主体网格外推（v1.5 起）",
+        "criteria": criteria,
+        "measured_ratio": float(measured_ratio),
+        "measured_ratio_gate": float(TEMPO_MEASURED_RATIO_GATE),
+        "unmeasured_ranges": _contiguous(no_drum),
+        "measured_ranges": _contiguous([b for b in range(1, int(n_bars) + 1)
+                                        if b not in set(no_drum)]),
+        "segments": segments,
+        "bpm_changes": [{"bar": c.bar, "bpm": c.bpm} for c in changes],
+        "bar_start_table": table,
+        "scan": {"lo": float(scan_lo), "hi": float(scan_hi),
+                 "coarse_step": float(coarse_step), "fine_step": float(fine_step),
+                 "window_bars": [int(x) for x in window_bars],
+                 "phase_free": True},
+        "cross_check": cross,
+        "notes": notes,
+        "replaces": "旧的「8/16 小节块 + 32 分网格 ±17 ms 相位回归」——"
+                    "该法对整格错位与 >0.4% 的 BPM 误差都不敏感，已作废",
+    })
+
+
+def _contiguous(bars: Sequence[int]) -> list[list[int]]:
+    """把小节号列表压成连续区间 [[a,b], ...]。"""
+    out: list[list[int]] = []
+    for b in sorted(int(x) for x in bars):
+        if out and b == out[-1][1] + 1:
+            out[-1][1] = b
+        else:
+            out.append([b, b])
+    return out
+
+
+def _json_safe(obj):
+    """把 NaN / ±Inf / numpy 标量换成 JSON 里安全的值。
+
+    `song_analysis.json` 被 `tools/chart_check` 等下游直接吃，
+    写出 `NaN` / `Infinity` 这种非标准字面量会坑到别的语言的解析器。
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, (np.floating, float)):
+        f = float(obj)
+        if f != f:
+            return None
+        if f == float("inf"):
+            return 1e9
+        if f == float("-inf"):
+            return -1e9
+        return f
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+
+def tempo_map_verdict(tm: dict) -> str:
+    """把 `tempo_map` 的结果翻成一句中文结论（给 CLI 与分析单用）。"""
+    if not tm.get("available"):
+        return "tempo map 不可用：" + str(tm.get("reason", ""))
+    st = tm.get("window_stats") or {}
+    body = tm.get("body_fit") or {}
+    sp = tm.get("half_split") or {}
+    head = ""
+    if tm["verdict"] == "constant":
+        head = (f"**BPM {tm['user_bpm']:.3f} 恒定，无变速**（四条判据全过）")
+    elif tm["verdict"] == "constant_in_measured":
+        rng = "、".join(f"{a}–{b}" for a, b in (tm.get("unmeasured_ranges") or [])[:6])
+        head = (f"**BPM {tm['user_bpm']:.3f} 在【可测区间】内恒定**——"
+                f"但只有 {tm.get('measured_ratio', 0)*100:.0f}% 的小节可测"
+                f"（门槛 {tm.get('measured_ratio_gate', 0)*100:.0f}%），"
+                f"**不可测小节：{rng}**。"
+                f"⚠️ **这些小节的速度既没测出来、也不得外推为同一 BPM**——"
+                f"前奏/尾奏很可能是变速（test-01 就栽在这里）；"
+                f"请用别的证据（抄谱、官方 BPM 表、人工听）补，或用 "
+                f"`test_tempo_hypothesis` 检验候选 tempo map")
+    elif tm["verdict"] == "constant_other_bpm":
+        head = (f"⚠️ **曲子速度是稳的，但不等于用户给的 BPM**："
+                f"实测 **{tm['detected_bpm']:.3f}**，用户给的是 {tm['user_bpm']:.3f}"
+                f"（差 {tm['detected_bpm'] - tm['user_bpm']:+.3f}）。"
+                f"照用户值铺网格，到曲末会累计偏离约 "
+                f"**{tm['drift_vs_user_ms']:.0f} ms**，请改 --bpm 后重跑")
+    elif tm["verdict"] == "variable":
+        segs = "；".join(f"bars {g['start_bar']}–{g['end_bar']} ≈ {g['bpm']:.2f}"
+                         for g in tm.get("segments", []))
+        head = f"**检出变速**：{segs}。`(bpm)` 标记见 `bpm_changes`，小节起点秒表见 `bar_start_table`"
+    else:
+        fail = [k for k, v in (tm.get("criteria") or {}).items() if not v.get("pass")]
+        head = (f"**无法判定**（未过的判据：{', '.join(fail) if fail else '证据不足'}）；"
+                f"已按用户 BPM 构造网格，请人工复核")
+    detail = ""
+    if st:
+        detail += (f"；{st['window_bars'] if 'window_bars' in st else ''}"
+                   f"逐窗最佳 BPM 中位 {st['median']:.3f}、std {st['std']:.3f}、"
+                   f"{st['n_valid']}/{st['n_windows']} 窗有效，"
+                   f"{st['hit_ratio_within_tol']*100:.0f}% 落在中位 ±{TEMPO_CONST_TOL_BPM}")
+    if body.get("available"):
+        detail += (f"；主体段拟合 {body['bpm']:.3f}"
+                   f"（95% 峰宽 {body['peak95_lo']:.3f}–{body['peak95_hi']:.3f}）")
+    if sp.get("available"):
+        detail += (f"；前后半独立拟合差 {sp['delta_bpm']:.3f}"
+                   f"（门槛 {sp['tolerance']:.2f}）")
+    jm = tm.get("phase_jumps") or []
+    detail += ("；相位曲线（8 分量程 ±%.0f ms）无跳格" % (tm.get("phase", {}).get("range_ms", 0.0))
+               if not jm else
+               "；⚠️ 相位曲线检出 %d 处跳格：%s" % (
+                   len(jm), ", ".join(f"bar{j['to_bar']}({j['jump_ms']:+.0f}ms)" for j in jm[:5])))
+    hb = tm.get("half_beat") or {}
+    if hb.get("available"):
+        if hb["verdict"] == "first":
+            detail += (f"；半拍归属 **维持 first**（kick/hat 在拍上，"
+                       f"只用了 {hb['n_bars_used']} 个干净小节）")
+        elif hb["verdict"] == "first+half":
+            detail += (f"；⚠️ 半拍归属指向 **first+半拍 = {hb['alt_first']:.4f}s**，"
+                       f"当前 first 可能整体错半拍")
+        else:
+            detail += "；半拍归属**不可判定**（kick/hat 正反拍能量接近）"
+    else:
+        detail += f"；半拍归属未判（{hb.get('reason', '')}）"
+    nd = tm.get("no_drum_bars") or []
+    if nd:
+        detail += (f"；{len(nd)} 个小节无鼓/无瞬态 → **不可测，按主体网格外推**"
+                   f"（不作为变速证据）")
+    return head + detail + "。"
+
+
+# =====================================================================
+# v1.5.1：候选 tempo map 假设检验（test-01 事故的直接产物）
+# =====================================================================
+#
+# 背景：前奏 / 尾奏这类无瞬态段落**自己测不出速度**。旧做法（外推为同一 BPM）
+# 在 test-01 上把「前奏 9 小节 195 + 减速 8 小节 + 尾奏 7 小节 221→108」
+# 整个抹平成「全曲恒定 205」。正确姿势是：从**别处**拿一个候选 tempo map
+# （抄谱、官方 BPM 表、人工听），在自己的音频上逐段检验它 ——
+# 分得开就报实测值，分不开就如实写「音频无法分辨，采用候选值」。
+
+
+def tempo_segments_to_beats(first: float, segments: Sequence[tuple[float, float]],
+                            beats_per_bar: int = 4) -> tuple[np.ndarray, list[dict], float]:
+    """分段 BPM 表 → 拍线数组。
+
+    `segments` 是 [(bpm, n_bars), ...]，`n_bars` 允许半小节（0.5）——
+    真实曲子的减速段常常半小节换一次速（test-01 的 bar12/bar13 就是）。
+
+    返回 (beat_times, seg_info, end_time)。
+    """
+    t = float(first)
+    beats: list[float] = []
+    info: list[dict] = []
+    for bpm, nb in segments:
+        spb = 60.0 / float(bpm)
+        n = int(round(float(nb) * beats_per_bar))
+        info.append({"bpm": float(bpm), "n_bars": float(nb), "start_sec": t,
+                     "dur_sec": n * spb, "end_sec": t + n * spb,
+                     "start_bar": len(beats) // beats_per_bar + 1,
+                     "start_beat_in_bar": len(beats) % beats_per_bar})
+        beats.extend(t + k * spb for k in range(n))
+        t += n * spb
+    return np.asarray(beats, dtype=float), info, float(t)
+
+
+def _line_score(lines: np.ndarray, t: np.ndarray, w: np.ndarray,
+                t0: float, t1: float, sigma: float) -> tuple[float | None, int]:
+    m = (t >= t0) & (t < t1)
+    if int(m.sum()) < 5:
+        return None, int(m.sum())
+    tt, ww = t[m], w[m] / max(w[m].sum(), 1e-12)
+    L = np.sort(lines)
+    i = np.searchsorted(L, tt)
+    d = np.full(tt.size, np.inf)
+    for off in (-1, 0):
+        j = np.clip(i + off, 0, L.size - 1)
+        d = np.minimum(d, np.abs(tt - L[j]))
+    return float((ww * np.exp(-(d ** 2) / (2 * sigma ** 2))).sum()), int(m.sum())
+
+
+def _median_dist(a: np.ndarray, lines: np.ndarray) -> float:
+    if a.size == 0 or lines.size == 0:
+        return float("nan")
+    L = np.sort(lines)
+    i = np.searchsorted(L, a)
+    d = np.full(a.size, np.inf)
+    for off in (-1, 0):
+        j = np.clip(i + off, 0, L.size - 1)
+        d = np.minimum(d, np.abs(a - L[j]))
+    return float(np.median(d))
+
+
+def test_tempo_hypothesis(onset_times, onset_weights, first: float,
+                          segments: Sequence[tuple[float, float]],
+                          beats_per_bar: int = 4, beat_times=None,
+                          sigma: float = 0.018,
+                          baseline_bpm: float | None = None,
+                          local_fit_span: float = 12.0,
+                          min_onsets_fit: int = 40,
+                          decisive_margin: float = 0.15,
+                          min_dur_decisive: float = 4.0,
+                          min_onsets_decisive: int = 80,
+                          min_score_decisive: float = 0.35) -> dict:
+    """检验一个**候选 tempo map**，并与「恒速外推」对照。
+
+    参数：
+        onset_times / onset_weights: 本曲的 onset（建议用 `high_res_onsets`）
+        first: 候选 map 里第 1 小节第 1 拍的秒数
+        segments: [(bpm, n_bars), ...]，n_bars 可为 0.5
+        beat_times: 可选，训练过的跟踪器给的拍点（如 beat_this），作旁证
+        baseline_bpm: 恒速对照用的 BPM（默认取 segments 里占小节最多的那个）
+        decisive_margin: 候选段得分比恒速高出这个相对比例才算「分得开」
+
+    每段的判定：
+      - `measured`：该段自己独立细扫出来的 BPM 与候选值一致（且事件够多）；
+      - `confirmed`：独立扫不动，但候选网格明显优于恒速外推；
+      - `adopted`：分不开 → **音频无法分辨，采用候选值**；
+      - `contradicted`：恒速外推明显更好 → 候选值可疑。
+
+    **只有同时满足三条「可判据」的段才允许出 `confirmed` / `contradicted`**，
+    否则一律 `adopted`：
+      ① 段长 ≥ `min_dur_decisive`（默认 4 s）——1 小节（约 1.2 s）在物理上
+         就分不开 185 与 205，硬判出来的都是噪声；
+      ② 段内 onset ≥ `min_onsets_decisive`（默认 80）；
+      ③ 两套网格里**较好的那个**得分 ≥ `min_score_decisive`（默认 0.35）——
+         得分都很低说明这段的 onset 本身就是噪声（混响 pad / 低通渐弱段的
+         onset 列表实测比随机还差），谁高谁低没有意义。
+    test-01 的教训：不加这三条，17 段里会有 9 段被误判成 `contradicted`。
+
+    ⚠️ 本函数**不替你做决定**：`adopted` 就是 `adopted`，下游必须照实写明
+    「音频无法分辨、采用候选值」，不得升格成实测结论。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    w = (np.ones_like(t) if onset_weights is None
+         else np.asarray(onset_weights, dtype=float))
+    beats, info, end = tempo_segments_to_beats(first, segments, beats_per_bar)
+    if beats.size < 4:
+        return {"available": False, "reason": "候选 map 太短"}
+    mid = (beats[:-1] + beats[1:]) / 2.0
+    lines_h = np.sort(np.concatenate([beats, mid]))
+
+    if baseline_bpm is None:
+        tally: dict[float, float] = {}
+        for bpm, nb in segments:
+            tally[float(bpm)] = tally.get(float(bpm), 0.0) + float(nb)
+        baseline_bpm = max(tally.items(), key=lambda kv: kv[1])[0]
+    n_beats_base = int(np.ceil((end - first) / (60.0 / baseline_bpm))) + 4
+    b_base = first + np.arange(n_beats_base) * (60.0 / baseline_bpm)
+    lines_b = np.sort(np.concatenate([b_base, (b_base[:-1] + b_base[1:]) / 2.0]))
+
+    bt = np.asarray(beat_times, dtype=float) if beat_times is not None else None
+    rows: list[dict] = []
+    for s in info:
+        a, z = s["start_sec"], s["end_sec"]
+        sh, n = _line_score(lines_h, t, w, a, z, sigma)
+        sb, _ = _line_score(lines_b, t, w, a, z, sigma)
+        row = {**s, "n_onsets": n, "score_hypothesis": sh, "score_baseline": sb}
+        # 本段能不能自己扫出 BPM
+        local = None
+        if n >= min_onsets_fit and (z - a) >= 4.0:
+            local = fine_bpm_fit(t, w, a, z,
+                                 max(40.0, s["bpm"] - local_fit_span),
+                                 s["bpm"] + local_fit_span, TEMPO_FINE_STEP,
+                                 subdivision=2, report_at=(s["bpm"], baseline_bpm))
+        row["local_fit"] = local
+        if bt is not None:
+            m = (bt >= a) & (bt < z)
+            row["beat_tracker_median_ms_hyp"] = _median_dist(bt[m], beats) * 1000.0
+            row["beat_tracker_median_ms_base"] = _median_dist(bt[m], b_base) * 1000.0
+        decisive = (sh is not None and sb is not None
+                    and (z - a) >= min_dur_decisive
+                    and n >= min_onsets_decisive
+                    and max(sh, sb) >= min_score_decisive)
+        row["decisive"] = bool(decisive)
+        local_ok = False
+        if local and local.get("available"):
+            sc_c = local["score_at"].get(f"{s['bpm']:.3f}", 0.0)
+            sc_b = local["score_at"].get(f"{baseline_bpm:.3f}", 0.0)
+            local_ok = (abs(local["bpm"] - s["bpm"]) <= 0.5
+                        and abs(local["bpm"] - baseline_bpm) > 0.5
+                        and sc_c > sc_b * (1.0 + decisive_margin))
+        if sh is None or sb is None:
+            row["verdict"] = "no_evidence"
+            row["note"] = "该段事件太少，音频给不出任何判据 → 采用候选值"
+        elif local_ok:
+            row["verdict"] = "measured"
+            row["note"] = (f"本段独立细扫得 {local['bpm']:.2f}，与候选值 {s['bpm']:.0f} 相符"
+                           f"（@候选 {local['score_at'].get(f'{s['bpm']:.3f}', 0):.3f} vs "
+                           f"@恒速 {local['score_at'].get(f'{baseline_bpm:.3f}', 0):.3f}）")
+        elif decisive and sb > 0 and (sh - sb) / max(sb, 1e-9) > decisive_margin:
+            row["verdict"] = "confirmed"
+            row["note"] = f"候选网格得分比恒速外推高 {(sh - sb) / sb * 100:.0f}%"
+        elif decisive and sh > 0 and (sb - sh) / max(sh, 1e-9) > decisive_margin:
+            row["verdict"] = "contradicted"
+            row["note"] = f"恒速外推反而高 {(sb - sh) / sh * 100:.0f}%，候选值可疑"
+        elif not decisive:
+            why = []
+            if (z - a) < min_dur_decisive:
+                why.append(f"段长 {z - a:.2f}s < {min_dur_decisive}s（物理上分不开）")
+            if n < min_onsets_decisive:
+                why.append(f"onset 只有 {n} 个")
+            if sh is not None and sb is not None and max(sh, sb) < min_score_decisive:
+                why.append(f"两套网格得分都只有 {max(sh, sb):.2f}（onset 本身是噪声）")
+            row["verdict"] = "adopted"
+            row["note"] = "**音频无法分辨，采用候选值**：" + "；".join(why)
+        else:
+            row["verdict"] = "adopted"
+            row["note"] = ("候选与恒速外推的差 < "
+                           f"{decisive_margin*100:.0f}% → **音频无法分辨，采用候选值**")
+        rows.append(row)
+
+    all_h, n_all = _line_score(lines_h, t, w, first, end, sigma)
+    all_b, _ = _line_score(lines_b, t, w, first, end, sigma)
+    out = {
+        "available": True, "first": float(first), "end_sec": float(end),
+        "n_bars": float(sum(nb for _, nb in segments)),
+        "baseline_bpm": float(baseline_bpm),
+        "overall_score_hypothesis": all_h, "overall_score_baseline": all_b,
+        "overall_n_onsets": n_all,
+        "segments": rows,
+        "counts": {k: sum(1 for r in rows if r["verdict"] == k)
+                   for k in ("measured", "confirmed", "adopted",
+                             "contradicted", "no_evidence")},
+        "decisive_margin": float(decisive_margin),
+        "policy": "adopted / no_evidence 的段必须如实标注「音频无法分辨，采用候选值」，"
+                  "不得当作实测结论",
+    }
+    if bt is not None:
+        out["beat_tracker_median_ms_hyp"] = _median_dist(
+            bt[(bt >= first) & (bt < end)], beats) * 1000.0
+        out["beat_tracker_median_ms_base"] = _median_dist(
+            bt[(bt >= first) & (bt < end)], b_base) * 1000.0
+    return _json_safe(out)
+
+
+def tempo_hypothesis_verdict(res: dict) -> str:
+    """把 `test_tempo_hypothesis` 的结果翻成一句中文结论。"""
+    if not res.get("available"):
+        return "候选 tempo map 检验不可用：" + str(res.get("reason", ""))
+    c = res["counts"]
+    parts = [f"{res['n_bars']:.0f} 小节 / {len(res['segments'])} 段",
+             f"实测 {c['measured']}", f"网格占优 {c['confirmed']}",
+             f"**分不开(采用候选值) {c['adopted'] + c['no_evidence']}**",
+             f"被反证 {c['contradicted']}"]
+    head = "候选 tempo map：" + "，".join(parts)
+    if res.get("overall_score_baseline"):
+        d = ((res["overall_score_hypothesis"] - res["overall_score_baseline"])
+             / res["overall_score_baseline"] * 100.0)
+        head += f"；全曲 8 分格得分比恒速 {res['baseline_bpm']:.0f} 高 {d:+.0f}%"
+    if res.get("beat_tracker_median_ms_hyp") is not None:
+        head += (f"；拍点跟踪器到候选拍线的中位距 "
+                 f"{res['beat_tracker_median_ms_hyp']:.0f} ms vs 恒速 "
+                 f"{res['beat_tracker_median_ms_base']:.0f} ms")
+    if c["contradicted"]:
+        head += "。⚠️ 有段被音频反证，必须人工复核"
+    return head + "。"

@@ -1360,3 +1360,396 @@ def test_song_sheet_md_contains_writing_hints_section():
     md = sheet_mod.build_song_sheet_md(payload, segs, rows)
     assert "## 1.5 写谱提示（按段落）" in md
     assert "建议配置族" in md and "采音建议" in md and "手序提示" in md
+
+
+# ==================================================================
+# tempo map 复核（grid v1.5）——两个「旧方法抓不住、新方法必须抓住」的用例
+# ==================================================================
+#
+# 旧方法 = `docs/audio-analysis.md` §2.4 第 5 步：8 小节一块，在 **32 分网格**
+# （±半格 ≈ ±17 ms @205BPM）上求相位 φ_i，再对 (t_i, φ_i) 线性回归。
+# 本节用合成信号把它的两个盲点钉死：
+#   ① 半拍错位 —— 半拍 = 16 个 32 分格，在 32 分网格上**混叠成 0**，旧法读数完美；
+#   ② BPM +0.5% —— 一块之内相位就绕过一整格，旧法回归到的斜率是绕圈残值。
+
+from tools.audio_analysis import grid as grid_mod  # noqa: E402
+
+TSR = grid_mod.TEMPO_SR
+
+
+def _tone_burst(freqs, n, sr, decay):
+    t = np.arange(n) / sr
+    env = np.exp(-t / decay)
+    y = np.zeros(n)
+    for f in np.atleast_1d(freqs):
+        y += np.sin(2 * np.pi * float(f) * t)
+    return (y / len(np.atleast_1d(freqs))) * env
+
+
+def _bandlimit(y: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarray:
+    """对**整条信号**做理想带限（rfft 置零）。
+
+    必须整条做，不能逐个 patch 做：瞬态 patch 的起始跳变会把宽带能量溅到
+    其它频带（实测 8 kHz 的 hat 会在 35–120 Hz 的 kick 带里造出假击打），
+    那样测的就不是算法而是合成信号的缺陷了。
+    """
+    Y = np.fft.rfft(y)
+    f = np.fft.rfftfreq(len(y), 1.0 / sr)
+    Y[(f < lo) | (f > hi)] = 0.0
+    return np.fft.irfft(Y, n=len(y))
+
+
+def _place(y, times, patch, sr, gain=1.0):
+    for t in np.atleast_1d(times):
+        i = int(round(float(t) * sr))
+        if i < 0 or i >= len(y):
+            continue
+        m = min(len(patch), len(y) - i)
+        y[i:i + m] += gain * patch[:m]
+
+
+def synth_drumkit(bpm: float, first: float, n_bars: int, sr: int = TSR,
+                  beats_per_bar: int = 4):
+    """合成一套**分带干净**的鼓组：kick 四分四拍 / hat 八分 / bass 八分反拍。
+
+    - kick 55 Hz，整条带限到 40–110 Hz（落在 `TEMPO_BANDS['kick']` 35–120 内）
+    - hat 8k+11k Hz，带限到 6.5–14 kHz（落在 6–15 kHz 内）
+    - bass 180 Hz，带限到 140–290 Hz（落在 30–300 内，但**避开** kick 的 35–120）
+
+    bass 故意打在八分反拍上，复刻真实曲风里的 **offbeat bass**——
+    半拍归属必须靠 kick/hat 判，bass 指向反拍不算反例。
+    """
+    spb = 60.0 / float(bpm)
+    bar = beats_per_bar * spb
+    dur = first + n_bars * bar + 1.0
+    n = int(round(dur * sr))
+    kick = np.zeros(n)
+    hat = np.zeros(n)
+    bass = np.zeros(n)
+    kick_p = _tone_burst([55.0], int(0.13 * sr), sr, 0.030)
+    hat_p = _tone_burst([8000.0, 11000.0], int(0.03 * sr), sr, 0.006)
+    bass_p = _tone_burst([180.0], int(0.11 * sr), sr, 0.030)
+    beats = first + np.arange(n_bars * beats_per_bar) * spb
+    _place(kick, beats, kick_p, sr, 1.0)                  # 整拍：kick
+    _place(hat, beats, hat_p, sr, 1.0)                    # 整拍：hat
+    _place(hat, beats + spb / 2.0, hat_p, sr, 0.55)       # 反拍：只有 hat（更弱）
+    _place(bass, beats + spb / 2.0, bass_p, sr, 1.0)      # 反拍：bass
+    # 轻度带限：削掉瞬态起跳溅到别的频带的部分，但保留真实的攻击形状
+    kick = _bandlimit(kick, sr, 30.0, 400.0)
+    hat = _bandlimit(hat, sr, 5000.0, 16000.0)
+    bass = _bandlimit(bass, sr, 130.0, 900.0)
+    drums = kick / (np.max(np.abs(kick)) or 1.0) + 0.35 * hat / (np.max(np.abs(hat)) or 1.0)
+    drums = drums / (np.max(np.abs(drums)) or 1.0) * 0.8
+    bass = bass / (np.max(np.abs(bass)) or 1.0) * 0.8
+    # 底噪：真实音频不会有「数字静音的频带」，没有底噪时 dB flux 会在空带上爆炸
+    rng = np.random.default_rng(7)
+    drums = drums + rng.standard_normal(n) * 1e-4
+    bass = bass + rng.standard_normal(n) * 1e-4
+    return drums.astype(np.float32), bass.astype(np.float32), float(dur)
+
+
+def _legacy_block_phase(onset_times, bpm: float, first: float,
+                        beats_per_bar: int = 4, bars_per_block: int = 8,
+                        division: int = 32):
+    """复刻**旧做法**：8 小节一块 + 32 分网格 ±半格相位搜索 + 线性回归。
+
+    只在测试里存在，用来证明新法确实堵住了旧法的盲点。
+    返回 (block_times, block_phases_sec, slope)。
+    """
+    t = np.asarray(onset_times, dtype=float)
+    bar = beats_per_bar * 60.0 / float(bpm)
+    slot = bar / float(division)
+    block = bars_per_block * bar
+    n_blocks = max(1, int((t.max() - first) / block))
+    cand = np.linspace(-slot / 2.0, slot / 2.0, 201)
+    ts, ph = [], []
+    for b in range(n_blocks):
+        a = first + b * block
+        m = (t >= a) & (t < a + block)
+        if int(m.sum()) < 8:
+            continue
+        # 每个候选相位下，onset 到最近格线的命中率
+        score = [float(np.mean(np.abs(((t[m] - first - c + slot / 2.0) % slot)
+                                      - slot / 2.0) < slot * 0.2)) for c in cand]
+        ts.append(a + block / 2.0)
+        ph.append(float(cand[int(np.argmax(score))]))
+    slope = float(np.polyfit(ts, ph, 1)[0]) if len(ts) >= 3 else 0.0
+    return np.array(ts), np.array(ph), slope, slot
+
+
+def test_tempo_half_beat_offset_caught_by_new_blind_to_legacy():
+    """用例①：`&first` 整体错半拍 —— 旧法完全看不见，新法必须指出来。"""
+    bpm, first, n_bars = 180.0, 0.5, 24
+    drums, bass, dur = synth_drumkit(bpm, first, n_bars)
+    onsets_hi = grid_mod.high_res_onsets(drums, sr=TSR)
+    half = 0.5 * 60.0 / bpm
+    wrong_first = first + half
+
+    # --- 旧法：32 分网格块相位，对半拍错位完全免疫（混叠成 0）---
+    _, ph_ok, _, slot = _legacy_block_phase(onsets_hi["times"], bpm, first)
+    _, ph_bad, _, _ = _legacy_block_phase(onsets_hi["times"], bpm, wrong_first)
+    assert np.max(np.abs(ph_bad)) <= slot / 2.0
+    # 错半拍与不错半拍，旧法给出的相位读数几乎一模一样 → 它分不开
+    assert abs(float(np.median(np.abs(ph_bad))) - float(np.median(np.abs(ph_ok)))) < 0.005
+
+    # --- 新法：分带 flux + 只在干净小节上判 ---
+    bands = {n: grid_mod.band_flux(drums if n != "bass" else bass, sr=TSR,
+                                   f_lo=lo, f_hi=hi)
+             for n, (lo, hi) in grid_mod.TEMPO_BANDS.items()}
+    ft = bands["kick"]["frame_times"]
+    flux = {k: v["flux"] for k, v in bands.items()}
+
+    clean_ok = grid_mod.cleanest_drum_bars(flux["kick"], ft, bpm=bpm, first=first,
+                                           n_bars=n_bars)
+    assert clean_ok, "合成信号是标准 4-on-the-floor，必须能挑出干净小节"
+    res_ok = grid_mod.half_beat_attribution(flux, ft, bpm=bpm, first=first, bars=clean_ok)
+    assert res_ok["verdict"] == "first"
+    assert res_ok["bands"]["kick"]["ratio"] > grid_mod.TEMPO_ATTR_RATIO_GATE
+    # bass 打在反拍（offbeat bass）：指向反拍但**不**推翻结论
+    assert res_ok["bands"]["bass"]["ratio"] < 1.0
+    assert "offbeat bass" in res_ok["reason"]
+
+    clean_bad = grid_mod.cleanest_drum_bars(flux["kick"], ft, bpm=bpm,
+                                            first=wrong_first, n_bars=n_bars - 1)
+    res_bad = grid_mod.half_beat_attribution(flux, ft, bpm=bpm, first=wrong_first,
+                                             bars=clean_bad)
+    assert res_bad["verdict"] == "first+half", res_bad["reason"]
+    assert abs(res_bad["alt_first"] - (wrong_first + half)) < 1e-9
+
+
+def test_tempo_bpm_half_percent_error_caught_by_new_blind_to_legacy():
+    """用例②：真实 BPM 比用户值高 0.5% —— 旧法因绕圈而失明，新法必须测出来。"""
+    user_bpm = 180.0
+    true_bpm = user_bpm * 1.005          # 180.9
+    first, n_bars = 0.5, 24
+    drums, bass, dur = synth_drumkit(true_bpm, first, n_bars)
+    onsets_hi = grid_mod.high_res_onsets(drums, sr=TSR)
+
+    # --- 旧法：相位在一块之内就绕过一整格，读数被折回 ±半格 ---
+    ts, ph, slope, slot = _legacy_block_phase(onsets_hi["times"], user_bpm, first)
+    drift_over_block = 8 * 4 * 60.0 / user_bpm * 0.005
+    assert drift_over_block > slot, "构造前提：一块的真实漂移必须超过一个 32 分格"
+    assert np.max(np.abs(ph)) <= slot / 2.0 + 1e-9      # 被折回，看不出累积
+    # 旧法回归到的斜率远小于真实的 0.005，至少低估 5 倍 → 判成「无漂移」
+    assert abs(slope) < 1e-3
+    assert abs(slope) < 0.2 * 0.005
+    assert abs(user_bpm * (1 - slope) - true_bpm) > 0.5   # 反推的 BPM 也是错的
+
+    # --- 新法之一：无相位滑窗扫描，逐窗都指向真实 BPM ---
+    wins = grid_mod.window_bpm_scan(onsets_hi["times"], onsets_hi["weights"],
+                                    bpm=user_bpm, first=first, n_bars=n_bars,
+                                    window_bars=4)
+    loc = np.array([w["best_local"] for w in wins if w["valid"]], dtype=float)
+    assert loc.size >= 8
+    assert abs(float(np.median(loc)) - true_bpm) < 0.3, float(np.median(loc))
+    assert abs(float(np.median(loc)) - user_bpm) > grid_mod.TEMPO_CONST_TOL_BPM
+
+    # --- 新法之二：主体段高精度拟合 ---
+    fit = grid_mod.fine_bpm_fit(onsets_hi["times"], onsets_hi["weights"],
+                                first, first + n_bars * 4 * 60.0 / user_bpm,
+                                user_bpm - 5, user_bpm + 5, report_at=(user_bpm,))
+    assert fit["available"] and abs(fit["bpm"] - true_bpm) < 0.15
+
+    # --- 总装：verdict 不得是 constant，且必须点名是哪条判据没过 ---
+    tm = grid_mod.tempo_map(y_mix=drums + bass, y_drums=drums, y_bass=bass, sr=TSR,
+                            bpm=user_bpm, first=first, duration=dur,
+                            use_beat_this=False, use_librosa=False)
+    assert tm["available"] and tm["verdict"] != "constant"
+    # 曲子本身是稳的，只是用户给的 BPM 错了 → 单独一档，并报出实测值与累计偏离
+    assert tm["verdict"] == "constant_other_bpm", tm["criteria"]
+    assert tm["criteria"]["body_fit_matches_user"]["pass"] is False
+    assert abs(tm["detected_bpm"] - true_bpm) < 0.15
+    assert tm["drift_vs_user_ms"] > 100.0
+    v = grid_mod.tempo_map_verdict(tm)
+    assert "不等于用户给的 BPM" in v and "请改 --bpm" in v
+
+
+def test_tempo_map_constant_positive_control():
+    """正对照：BPM / first 都正确时必须判「恒定」，半拍归属维持 first。"""
+    bpm, first, n_bars = 180.0, 0.5, 24
+    drums, bass, dur = synth_drumkit(bpm, first, n_bars)
+    tm = grid_mod.tempo_map(y_mix=drums + bass, y_drums=drums, y_bass=bass, sr=TSR,
+                            bpm=bpm, first=first, duration=dur,
+                            use_beat_this=False, use_librosa=False)
+    assert tm["verdict"] == "constant", tm["criteria"]
+    assert all(c["pass"] for c in tm["criteria"].values())
+    assert tm["half_beat"]["verdict"] == "first"
+    assert tm["phase_jumps"] == []
+    assert abs(tm["body_fit"]["bpm"] - bpm) < 0.1
+    assert tm["scan"]["phase_free"] is True
+    v = grid_mod.tempo_map_verdict(tm)
+    assert "恒定" in v and "无跳格" in v
+
+
+@pytest.mark.parametrize("shift_div, label", [(4, "16 分"), (8, "32 分")])
+def test_tempo_phase_jump_detected(shift_div, label):
+    """中途插入一个 16 分 / 32 分的接缝 —— 8 分量程的相位曲线必须看得见跳格。
+
+    这正是旧法（32 分网格 ±17 ms）**结构上**看不见的一类故障：
+    16 分 = 2 个 32 分格、32 分 = 1 个 32 分格，在那张网格上都混叠成 0。
+    """
+    bpm, first, n_bars = 180.0, 0.5, 20
+    spb = 60.0 / bpm
+    shift = spb / shift_div
+    beats = first + np.arange(n_bars * 4) * spb
+    onsets_ = np.concatenate([beats, beats + spb / 2.0])      # 四分 + 八分反拍
+    onsets_ = np.sort(onsets_)
+    shifted = onsets_.copy()
+    shifted[onsets_ >= first + (n_bars // 2) * 4 * spb] += shift
+    curve = grid_mod.bar_phase_curve(shifted, np.ones_like(shifted), bpm=bpm,
+                                     first=first, n_bars=n_bars, min_onsets=3)
+    jumps = grid_mod.detect_phase_jumps(curve)
+    assert jumps, f"{label}接缝必须被检出"
+    # 8 分格的量程是 ±半格；16 分恰好是半格（符号简并），故只比幅度
+    assert any(abs(abs(j["jump_ms"]) - shift * 1000.0) < 6.0 for j in jumps), \
+        [round(j["jump_ms"], 1) for j in jumps]
+
+    # 旧法对照：32 分网格上，这个接缝是整数个格 → 相位读数不动
+    _, ph, _, slot = _legacy_block_phase(shifted, bpm, first, bars_per_block=4)
+    assert np.max(np.abs(ph)) <= slot / 2.0 + 1e-9
+
+
+def test_tempo_no_drum_bars_are_not_evidence():
+    """无鼓段只标 `no_drum_bars`，不进 onset 验证，**也不得被外推成 constant**。
+
+    v1.5.1（test-01 事故）：旧行为在这里报 `constant`，等于宣称
+    「挖空的那几小节也是这个速度」——正是把一首前奏 195 / 尾奏 221→108 的曲子
+    判成「全曲恒定 205」的那个 bug。
+    """
+    bpm, first, n_bars = 180.0, 0.5, 24
+    drums, bass, dur = synth_drumkit(bpm, first, n_bars)
+    bar = 4 * 60.0 / bpm
+    silent = drums.copy()
+    a, b = int((first + 4 * bar) * TSR), int((first + 8 * bar) * TSR)
+    silent[a:b] = 0.0                              # bars 5–8 挖空
+    tm = grid_mod.tempo_map(y_mix=silent + bass, y_drums=silent, y_bass=bass, sr=TSR,
+                            bpm=bpm, first=first, duration=dur,
+                            use_beat_this=False, use_librosa=False)
+    assert set(range(5, 9)) <= set(tm["no_drum_bars"])
+    assert tm["verdict"] == "constant_in_measured", (tm["verdict"], tm["criteria"])
+    assert tm["measured_ratio"] < grid_mod.TEMPO_MEASURED_RATIO_GATE
+    assert [5, 8] in tm["unmeasured_ranges"]
+    assert "不做 onset 验证" in " ".join(tm["notes"])
+    v = grid_mod.tempo_map_verdict(tm)
+    assert "可测区间" in v and "不得外推" in v and "5–8" in v
+
+
+def test_tempo_slow_intro_plus_constant_body_is_not_constant():
+    """**前奏慢速 + 主体恒速**：绝不能判 `constant`（test-01 的原始事故）。
+
+    两个变体都测：
+      (a) 前奏有鼓但慢 → 滑窗能看见 → 判据直接不过；
+      (b) 前奏没鼓（真实曲子的样子）→ 不可测占比超门槛 → `constant_in_measured`。
+    """
+    intro_bpm, body_bpm, first = 150.0, 200.0, 0.5
+    n_intro, n_body = 8, 24
+    d1, b1, _ = synth_drumkit(intro_bpm, first, n_intro)
+    intro_end = first + n_intro * 4 * 60.0 / intro_bpm
+    d2, b2, _ = synth_drumkit(body_bpm, intro_end, n_body)
+    n = max(len(d1), len(d2))
+    def pad(x):
+        y = np.zeros(n, dtype=np.float32); y[:len(x)] += x; return y
+    # 前奏段只保留 d1、主体段只保留 d2
+    cut = int(intro_end * TSR)
+    drums = pad(d1).copy(); drums[cut:] = 0.0
+    tail = pad(d2).copy(); tail[:cut] = 0.0
+    drums = drums + tail
+    bass = pad(b1).copy(); bass[cut:] = 0.0
+    bass = bass + np.where(np.arange(n) >= cut, pad(b2), 0).astype(np.float32)
+    dur = n / TSR
+
+    tm = grid_mod.tempo_map(y_mix=drums + bass, y_drums=drums, y_bass=bass, sr=TSR,
+                            bpm=body_bpm, first=first, duration=dur,
+                            use_beat_this=False, use_librosa=False)
+    assert tm["verdict"] != "constant", (tm["verdict"], tm["criteria"])
+
+    # (b) 把前奏的鼓挖掉 —— 这才是 test-01 的真实形态
+    silent = drums.copy(); silent[:cut] = 0.0
+    tm2 = grid_mod.tempo_map(y_mix=silent + bass, y_drums=silent, y_bass=bass, sr=TSR,
+                             bpm=body_bpm, first=first, duration=dur,
+                             use_beat_this=False, use_librosa=False)
+    assert tm2["verdict"] != "constant", (tm2["verdict"], tm2["criteria"])
+    assert tm2["verdict"] == "constant_in_measured", tm2["verdict"]
+    assert tm2["unmeasured_ranges"] and tm2["unmeasured_ranges"][0][0] == 1
+
+
+def test_tempo_hypothesis_scores_candidate_map():
+    """候选 tempo map 检验：真值分段必须优于恒速外推，且短段一律判 `adopted`。"""
+    intro_bpm, body_bpm, first = 150.0, 200.0, 0.5
+    n_intro, n_body = 8, 24
+    d1, b1, _ = synth_drumkit(intro_bpm, first, n_intro)
+    intro_end = first + n_intro * 4 * 60.0 / intro_bpm
+    d2, b2, _ = synth_drumkit(body_bpm, intro_end, n_body)
+    n = max(len(d1), len(d2))
+    cut = int(intro_end * TSR)
+    y = np.zeros(n, dtype=np.float32)
+    y[:cut] += d1[:cut]
+    y[cut:len(d2)] += d2[cut:]
+    o = grid_mod.high_res_onsets(y, sr=TSR)
+
+    segs = [(intro_bpm, n_intro), (body_bpm, n_body)]
+    res = grid_mod.test_tempo_hypothesis(o["times"], o["weights"], first, segs)
+    assert res["available"]
+    assert res["overall_score_hypothesis"] > res["overall_score_baseline"] * 1.2
+    assert res["baseline_bpm"] == body_bpm          # 小节最多的那段
+    assert res["counts"]["contradicted"] == 0
+    assert res["segments"][0]["verdict"] in ("measured", "confirmed")
+
+    # 短段（1 小节）在物理上分不开 → 必须 adopted，不得硬判
+    short = [(intro_bpm, 1), (170.0, 1), (190.0, 1), (body_bpm, n_body)]
+    res2 = grid_mod.test_tempo_hypothesis(o["times"], o["weights"], first, short)
+    for r in res2["segments"][:3]:
+        assert r["verdict"] == "adopted", (r["bpm"], r["verdict"], r["note"])
+        assert "无法分辨" in r["note"]
+    assert "采用候选值" in grid_mod.tempo_hypothesis_verdict(res2)
+
+
+def test_tempo_segments_to_beats_supports_half_bars():
+    """半小节段（真实减速段常见）必须能表达。"""
+    beats, info, end = grid_mod.tempo_segments_to_beats(
+        0.0, [(160.0, 0.5), (120.0, 0.5), (200.0, 1)])
+    assert len(beats) == 8
+    assert info[1]["start_bar"] == 1 and info[1]["start_beat_in_bar"] == 2
+    assert info[2]["start_bar"] == 2 and info[2]["start_beat_in_bar"] == 0
+    assert abs(end - (2 * 60 / 160 + 2 * 60 / 120 + 4 * 60 / 200)) < 1e-9
+
+
+def test_tempo_map_beat_this_optional_and_librosa_warned():
+    """beat_this 可关；librosa 路必须带 hop 帧量化告警。"""
+    bpm, first, n_bars = 180.0, 0.5, 12
+    drums, bass, dur = synth_drumkit(bpm, first, n_bars)
+    tm = grid_mod.tempo_map(y_mix=drums + bass, y_drums=drums, sr=TSR, bpm=bpm,
+                            first=first, duration=dur,
+                            use_beat_this=False, use_librosa=True)
+    assert tm["cross_check"]["beat_this"]["available"] is False
+    assert "关闭" in tm["cross_check"]["beat_this"]["reason"]
+    lb = tm["cross_check"]["librosa"]
+    if lb.get("available"):
+        assert "量化" in lb["warning"] and "不得单独作结论" in lb["warning"]
+    assert "不得单独作结论" in tm["cross_check"]["note"]
+
+
+def test_tempo_segments_and_bar_table_on_variable_tempo():
+    """判为变速时要给出 `(bpm)` 段落表与重算的小节起点秒。"""
+    first = 0.0
+    a_bpm, b_bpm, n_a, n_b = 180.0, 200.0, 16, 16
+    spb_a, spb_b = 60.0 / a_bpm, 60.0 / b_bpm
+    beats = list(first + np.arange(n_a * 4) * spb_a)
+    t = beats[-1] + spb_a
+    beats += list(t + np.arange(n_b * 4) * spb_b)
+    times = np.array(beats)
+    wins = grid_mod.window_bpm_scan(times, np.ones_like(times), bpm=a_bpm, first=first,
+                                    n_bars=n_a + n_b, window_bars=4, local_span=20.0)
+    segs = grid_mod.segment_tempo(wins, bpm=a_bpm, first=first)
+    assert len(segs) >= 2, segs
+    assert abs(segs[0]["bpm"] - a_bpm) < 1.0
+    assert abs(segs[-1]["bpm"] - b_bpm) < 1.5
+    changes = grid_mod.bpm_changes_from_segments(segs, base_bpm=segs[0]["bpm"])
+    assert changes and changes[0].bar > 1
+    table = grid_mod.bar_start_table(segs[0]["bpm"], first, bpm_changes=changes,
+                                     n_bars=n_a + n_b)
+    assert len(table) == n_a + n_b
+    assert table[0]["start_sec"] == 0.0
+    # 变速之后的小节应该比恒速外推得更密
+    const = grid_mod.bar_start_table(a_bpm, first, n_bars=n_a + n_b)
+    assert table[-1]["start_sec"] < const[-1]["start_sec"]
