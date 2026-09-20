@@ -236,6 +236,76 @@ def test_内部切点可整体替换_只是诊断口径():
 
 
 # ---------------------------------------------------------------------------
+# 似踩非踩（MMFC 5.3 的第四个社区说法）——**布尔诊断，不是第四个档位**
+# ---------------------------------------------------------------------------
+
+
+def test_似踩非踩_匀速铺满且cov高且extra高():
+    """MMFC 5.3：「海底谭的副歌采用了一种似踩非踩的写法，全程铺满 8 分音符」。
+
+    16 个匀速槽把小节铺满；音轨只有 4 个音，全被盖住（coverage=1），
+    另外 12 个格子哪条 stem 都对不上（extra_ratio=0.75）。
+    """
+    ev = _grid(16, 0.125)
+    pool = _grid(4, 0.5)
+    m = sp.bar_metrics(ev, 16, pool, pool, 0.0, BAR, BPB)
+    assert m["coverage"] == 1.0 and m["extra_ratio"] > 0.7
+    assert m["pseudo_sample"] is True
+    # ★ 它**不是**第四个档位：采音方式照样报社区三词里的「全踩」
+    assert m["mode"] == "全踩"
+
+
+def test_似踩非踩_不匀速就不算铺满():
+    ev = [0.0, 0.1, 0.2, 0.3, 0.9, 1.0, 1.1, 1.2, 1.3, 1.9]   # 两簇，不匀速
+    pool = _grid(4, 0.5)
+    m = sp.bar_metrics(ev, len(ev), pool, pool, 0.0, BAR, BPB)
+    assert m["pseudo_sample"] is False
+
+
+def test_似踩非踩_铺满但每个格子都对得上音轨就不算():
+    ev = _grid(16, 0.125)
+    m = sp.bar_metrics(ev, 16, ev, ev, 0.0, BAR, BPB)          # extra = 0
+    assert m["coverage"] == 1.0 and m["extra_ratio"] == 0.0
+    assert m["pseudo_sample"] is False and m["mode"] == "全踩"
+
+
+def test_似踩非踩_槽太少不算铺满():
+    ev = _grid(4, 0.5)
+    pool = [0.0]
+    m = sp.bar_metrics(ev, 4, pool, pool, 0.0, BAR, BPB)
+    assert m["pseudo_sample"] is False
+
+
+def test_似踩非踩_coverage低不算_指纹是cov高而不是cov低():
+    """`sampling-terminology-survey.md` §未找到 第 6 条猜的是"coverage 低 + extra 高"，
+
+    160 首实跑下来方向相反：铺满会把音轨那点音顺手全盖住，所以 coverage 反而高。
+    """
+    ev = _grid(16, 0.125)
+    pool = [0.06, 0.19, 0.31, 0.44, 0.56, 0.69, 0.81, 0.94]    # 全落在格子之间
+    m = sp.bar_metrics(ev, 16, pool, pool, 0.0, BAR, BPB)
+    assert m["coverage"] < 0.5
+    assert m["pseudo_sample"] is False
+
+
+def test_似踩非踩_诊断口径可整体替换_不是术语定义():
+    th = dict(sp.THRESHOLDS)
+    th["even_min_slots"] = 32
+    ev = _grid(16, 0.125)
+    pool = _grid(4, 0.5)
+    assert sp.pseudo_sample_flag(ev, 1.0, 0.75) is True
+    assert sp.pseudo_sample_flag(ev, 1.0, 0.75, th) is False
+    assert {"even_tol", "even_min_slots", "pseudo_extra_lo"} <= set(sp.THRESHOLDS)
+
+
+def test_似踩非踩_没有变成第四个采音方式():
+    # 社区没有把这四个词当一组互斥分类用；对外仍然只有三个词
+    assert sp.MODE_ORDER == ("全踩", "舍音", "留白")
+    assert "似踩非踩" not in sp.MODE_ORDER
+    assert "似踩非踩" not in sp.LEGACY_MODE_ALIASES
+
+
+# ---------------------------------------------------------------------------
 # 目标音轨选择
 # ---------------------------------------------------------------------------
 

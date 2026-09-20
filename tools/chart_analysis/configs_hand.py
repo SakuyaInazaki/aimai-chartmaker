@@ -156,7 +156,7 @@ PENDING_USER_PARAMS: tuple[str, ...] = ()
 #: 已按用户口径结案的口径（保留名字，供报告对照）
 RESOLVED_USER_PARAMS: dict[str, str] = {
     "vertical_split_ms": "019 补充：长度优先，≤3 个击打音可单手",
-    "side_double_guard_slots": "030：改用 `hands.side_double_events` 的有无引导（定性）",
+    "side_double_guard_slots": "030：改用 `hands.side_double_events` 的**引导八型**（定性）",
     "start_hand": "067：段首起手 = 离上一段结束近的手",
     "one_hand_two_objects": "066：保持关闭（写谱不以手法为导向）",
     "slide_owner_rule": "065：头与条可分属两手、无偏好",
@@ -1177,11 +1177,13 @@ def detect_double_run(ctx: HandCtx) -> list[ConfigHitH]:
     """**030 连续双押**（手级）+ `侧边双押` 复核清单。
 
     规格（§5）：``pairs`` 连续 ≥3；**双押纵** = 两手键都常量；**绕圈** = 两手同向逐格推进；
-    **侧边双押** = ``{L,R} ∈ {{2,3},{6,7}}``，只标**有没有引导**（判据来自
-    `hands.side_double_events`，四型形状判定，**"突然"不用数字定义**）。
+    **侧边双押** = ``{L,R} ∈ {{2,3},{6,7}}``，标**是哪一种引导**（判据来自
+    `hands.side_double_events`，**八型形状判定 + 两级阅读窗口**，
+    **"突然"不用数字定义**）。
 
-    ⚠️ "引导"的四型是 agent 按用户给的三个例子归纳的，**覆盖不全**（388 官谱上 307 次
-    判不出引导）。所以无引导的那些是**供人复核的清单**，不记无理、不下判决。
+    ⚠️ 八型（A/B·C·D 来自用户三个例子，G·H·F1·F2·E 来自 388 官谱普查）仍是 agent 的
+    归纳，**覆盖率高不等于归纳正确**。所以无引导的那些是**供人复核的清单**，
+    不记无理、不下判决。
     """
     out: list[ConfigHitH] = []
     slots = ctx.slots
@@ -1230,20 +1232,23 @@ def detect_double_run(ctx: HandCtx) -> list[ConfigHitH]:
         i = j + 1
     # --- 侧边双押（知识 030 铁律）---
     # 判据整体来自 `hands.side_double_events()`：铁律读作「**禁止突然（＝没有引导）的**
-    # 侧边双押」，只标**有没有引导**（A/B/C/D 四型形状判定），**不用数字定义"突然"**
-    # （用户 2026-09-20）。无引导的那些是**复核清单**，不是判决、不记无理。
+    # 侧边双押」，标**是哪一种引导**（八型形状判定 + 拍级→乐句级两级阅读窗口），
+    # **不用数字定义"突然"**（用户 2026-09-20）。
+    # 无引导（＝**乐句级窗口仍判不出**）的那些是**复核清单**，不是判决、不记无理。
     for ev in ctx.ha.side_doubles:
         idx = _slot_at(slots, ev["time"])
         if idx is None:
             continue
-        tag = (f"有引导（{ev['guide_type']} 型）" if ev["guided"]
+        types = ev["guide_types"] or ev["guide_types_phrase"]
+        tag = (f"有引导（{'+'.join(types)}；{ev['guide_level']}级窗口）" if ev["guided"]
                else "无引导 —— 请人复核（知识 030 铁律）")
         out.append(_span(
             ctx, idx, idx, "侧边双押", "030",
             f"{ev['keys'][0]}/{ev['keys'][1]}（{tag}）",
             f"L:{ev['L']}  R:{ev['R']}（同半圈相邻，必有一手出张）",
             {"keys": ev["keys"], "guided": ev["guided"],
-             "guide_type": ev["guide_type"], "redline": ev["redline"],
+             "guide_type": ev["guide_type"], "guide_types": list(types),
+             "guide_level": ev["guide_level"],
              # ↓ 纯诊断字段（定位用），不参与判定
              "near_dist": ev["near_dist"],
              "gap_ms": (None if ev["gap"] is None
@@ -2198,6 +2203,19 @@ def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
     "两手同在右半圈（如 L=1、R=4）"根本不难，再叫反手与知识 037「**出张的极端形**」
     的定义冲突。改为**必须有一只手真的出张**（L→2/3 或 R→6/7）。
     全库效果：5770 → 见报告 §"v0.2 重跑"。
+
+    ⚠️ **v0.3（2026-09-20）把 ``crossed`` 这一支也按 064 收紧**
+    （`docs/research/side-double-guidance-and-chuzhang.md` §5.5 / §6.2 建议 1）：
+    v0.2 只收紧了 ``same_half``，``crossed = ka in 1234 and kb in 5678`` 仍是 **006 的
+    中线**——结果 388 官谱上报出的 **266 段反手里 217 段（81.6%）一个出张落点都没有**，
+    全是 ``4,5,4,5`` / ``1,8,1,8`` 这种两手在 8–4 / 8–1 轴两侧交替敲
+    （`61-天国と地獄` m018/m052、`491-極圏` m097、`345-Oshama Scramble!` m006…）。
+    按知识 064，``L→1/4`` 与 ``R→5/8`` 都在共享区，那既不是出张、更不是"出张的极端形"。
+    **现在两支同一条件：至少一只手真出张。**
+    普查量级：官谱里"跨共享键的交叉"4 167 个交叉步中 **94.8% 两手都站在共享键
+    ``{1,4,5,8}`` 上**（``(L4,R5)`` 1 929、``(L1,R8)`` 1 473），出现在 374/388 张谱——
+    它就是扫键 / 楼梯在 8–4 轴上的正常换手，**不需要引导也不吃协调力**。
+    教程口径（037 的"跨半圈"）只作教学语汇保留，机检以 064 为准。
     """
     out: list[ConfigHitH] = []
     slots = [s for s in ctx.slots if s.n_hits == 1 and s.hit_keys[0] is not None]
@@ -2217,10 +2235,12 @@ def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
             # ka = 左手键、kb = 右手键
             same_half = ((ka in _RIGHT_HOME and kb in _RIGHT_HOME)
                          or (ka in _LEFT_HOME and kb in _LEFT_HOME))
-            # 知识 064：同半圈只有在**真的出张**时才是 037 说的"出张的极端形"
-            same_half = same_half and (is_chuzhang("L", ka) or is_chuzhang("R", kb))
             crossed = ka in _RIGHT_HOME and kb in _LEFT_HOME
             if not (same_half or crossed):
+                break
+            # 知识 064：**两支都一样**——只有在真的出张时才是 037 说的"出张的极端形"。
+            # （v0.3 把 `crossed` 支也收进来；v0.2 只收紧了 `same_half`，见 docstring。）
+            if not (is_chuzhang("L", ka) or is_chuzhang("R", kb)):
                 break
             j += 1
         ln = j - i + 1
@@ -2229,8 +2249,9 @@ def detect_backhand(ctx: HandCtx) -> list[ConfigHitH]:
             hs = "".join(s.hit_hands[0] for s in slots[i:j + 1])
             out.append(_span(
                 ctx, slots[i].index, slots[j].index, "反手", "037",
-                f"{ln} 音里两手始终被挤进同一半圈/交叉（键 {_fmt_keys(ks)}，手序 {hs}）",
-                f"L/R 交叉或同半圈（协调力，非手速）",
+                f"{ln} 音里两手始终被挤进同一半圈/交叉，且始终有一只手出张"
+                f"（键 {_fmt_keys(ks)}，手序 {hs}）",
+                f"L/R 交叉或同半圈 + 出张（协调力，非手速）",
                 {"length": ln, "keys": ks[:12], "hands": hs}))
             i = j + 1
         else:
@@ -2250,9 +2271,23 @@ def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
     它就是 ``is_chuzhang(hand, key)`` 这一个**布尔判定**加一个**计数**；跨到 6 还是 7、
     跨多久、跨多频繁都不构成档位，本模块不得自造分级。
 
-    机制部分保留：以每条 slide/hold 的 **[头, 名义尾]** 为窗口（这段时间那只手被
-    钉住），统计窗口内**落进出张区**的任务数；≥ ``chuzhang_min_cross`` 且其中至少
-    有一个是**击打**（不是纯轨道）时把这一段记成"出张"配置。
+    **两种成段方式**（v0.3，2026-09-20 起并列；依据
+    `docs/research/side-double-guidance-and-chuzhang.md` §4.2 / §6.3 建议 1）：
+
+    1. **被占手逼出**：以每条 slide/hold 的 **[头, 名义尾]** 为窗口（这段时间那只手被
+       钉住），统计窗口内**落进出张区**的任务数；≥ ``chuzhang_min_cross`` 且其中至少
+       有一个是**击打**（不是纯轨道）时记成一段。
+    2. **纯单点出张**（v0.3 新增）：一串**连续的单任务槽**里落了 ≥ ``chuzhang_min_cross``
+       个出张点，而这段时间**两只手都没有被 slide / hold 钉住**——
+       既不是被谁逼出来的，也不是双押/纵连的副产品，就是"这一下由那只手更顺"。
+
+    加第 2 种的理由是普查证据：388 官谱 5 739 个出张落点里，
+    **「另一只手被星星钉住 20.8% + 被长条钉住 15.4%」合计只占 36.2%**，
+    而**纯单点出张 30.2% 是最大的一类**（出张的是星星自己 22.3%、同刻双押的另一半
+    9.1%、落在纵连串里 2.1%）。只留第 1 种会让"出张段数"系统性地少掉最大的那一类，
+    读者容易把它误当成"出张总量"——**全谱出张落点计数一律看 `BarHand.chuzhang`
+    / `chart_summary` 的 ``chuzhang``，本检测器给的是"段"。**
+
     ``chuzhang_min_cross`` 只是"几个落点才值得单独记一段"的**内部计数口径**
     （agent 操作化），不是难度分级，也不向用户索取。
     """
@@ -2281,10 +2316,60 @@ def detect_chuzhang(ctx: HandCtx) -> list[ConfigHitH]:
                 f"{h} 手被 {t.kind}（{t.key}→{t.end_key or ''}）钉住 {t1 - t0:.2f}s，"
                 f"窗口内 {len(cross)} 个任务落进出张区（{desc}）",
                 f"{h}:被钉住  出张落点 {len(cross)} 个（知识 064：R→6/7、L→2/3）",
-                {"pin_hand": h, "pin_kind": t.kind, "n_cross": len(cross),
+                {"mode": "被占手逼出", "pin_hand": h, "pin_kind": t.kind,
+                 "n_cross": len(cross),
                  "cross": [[ctx.hand(j), ha.tasks[j].key] for j in cross][:8],
                  "dur_sec": round(t1 - t0, 3)}))
+    out.extend(_chuzhang_pure_singles(ctx))
     return _dedup(out)
+
+
+def _chuzhang_pure_singles(ctx: HandCtx) -> list[ConfigHitH]:
+    """**纯单点出张**（报告 §4.2 类 6，官谱里最大的一类，30.2%）。
+
+    形态：一串**连续的单任务槽**（相邻槽间隔 ≤1 拍，与 `detect_backhand` 同口径）里
+    出现 ≥ ``chuzhang_min_cross`` 个出张落点，且这段时间**没有任何一只手被
+    slide / wifi / hold 钉住**——没有被占手，也不是双押的另一半、不是纵连，
+    就是把一个 tap/hold 交给了对侧的手。
+
+    "没有手被钉住"这一条是为了**与上面那支互斥**（那支专管"被占手逼出"的出张），
+    不是难度判据。整段判定里没有任何阈值：``chuzhang_min_cross`` 是成段计数口径，
+    "≤1 拍"是"算不算同一串"的连读口径（同 037 反手）。
+    """
+    out: list[ConfigHitH] = []
+    ha = ctx.ha
+    pinned = [(t.t if t.kind == "hold" else
+               (ha.tasks[t.star_idx].t if t.star_idx >= 0 else t.t),
+               t.t_end_nominal or t.t_end)
+              for t in ha.tasks if t.kind in ("slide", "wifi", "hold")]
+    slots = [s for s in ctx.slots if s.n_hits == 1 and s.hit_keys[0] is not None]
+    n = len(slots)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n:
+            a, b = slots[j], slots[j + 1]
+            spb = 60.0 / a.bpm if a.bpm else 0.5
+            if b.t - a.t > 1.1 * spb:
+                break
+            j += 1
+        seg = slots[i:j + 1]
+        cross = [s for s in seg
+                 if is_chuzhang(s.hit_hands[0], s.hit_keys[0])]
+        if len(cross) >= ctx.p["chuzhang_min_cross"]:
+            t0, t1 = seg[0].t, seg[-1].t
+            if not any(a < t1 + 1e-6 and b > t0 - 1e-6 for a, b in pinned):
+                desc = ", ".join(f"{s.hit_hands[0]}→{s.hit_keys[0]}" for s in cross[:6])
+                out.append(_span(
+                    ctx, seg[0].index, seg[-1].index, "出张", "043",
+                    f"{len(seg)} 个单点里 {len(cross)} 个落进出张区（{desc}）；"
+                    f"这段两只手都没有被长条/星星钉住",
+                    f"纯单点出张 {len(cross)} 个（知识 064：R→6/7、L→2/3）",
+                    {"mode": "纯单点出张", "n_cross": len(cross),
+                     "cross": [[s.hit_hands[0], s.hit_keys[0]] for s in cross][:8],
+                     "n_slots": len(seg), "dur_sec": round(t1 - t0, 3)}))
+        i = j + 1
+    return out
 
 
 def detect_nplus1(ctx: HandCtx) -> list[ConfigHitH]:

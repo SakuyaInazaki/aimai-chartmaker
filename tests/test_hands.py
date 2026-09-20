@@ -178,52 +178,153 @@ def test_就近起手若造成出张则避开_知识067与064():
 # ---------------------------------------------------------------------------
 
 
-def test_侧边双押_无引导进复核清单_知识030():
-    ha = _assign("(220){8}8,1,4,2/3,E")
-    ev = ha.side_doubles
-    assert len(ev) == 1 and ev[0]["redline"] and not ev[0]["guided"]
+def _sd(body: str, keys: tuple[int, int] = (2, 3), idx: int = -1) -> dict:
+    """取某一对侧边双押事件（默认 2/3；默认取**最后一次**，前面那些常是铺垫）。"""
+    ev = [e for e in _assign(body).side_doubles if tuple(e["keys"]) == keys]
+    assert ev, f"{body} 没有 {keys} 侧边双押"
+    return ev[idx]
+
+
+def test_侧边双押_八型的值域与优先级_388普查():
+    # 用户三型（A/B·C·D）在前，388 官谱普查归纳的五型（G·H·F1·F2·E）在后
+    assert hd.SIDE_GUIDE_TYPES == ("A/B", "C", "D", "G", "H", "F1", "F2", "E")
+    assert set(hd.SIDE_GUIDE_DESC) == set(hd.SIDE_GUIDE_TYPES)
+
+
+def test_侧边双押_redline字段已删除_改为多标签():
+    # 报告 §6.1 建议 1：判据一放宽"无引导"就从 307 掉到个位数，`redline` 这个名字在误导
+    e = _sd("(120){4}5,6,7,2/3,E")
+    assert "redline" not in e
+    assert isinstance(e["guide_types"], list)
+
+
+# ---- 引导八型各一例（主形态；全部是形状判定，无阈值）----
+
+
+def test_侧边双押_A_B型_共享键步进_用户例():
+    # 用户例：18 / 87 / 76 / 65 / 54 —— 其中 7/6 本身就是侧边双押
+    e = _sd("(120){4}1/8,8/7,7/6,6/5,5/4,E", (6, 7))
+    assert e["guided"] and e["guide_type"] == "A/B" and "A/B" in e["guide_types"]
+
+
+def test_侧边双押_C型_等距轮转_用户例():
+    # 用户例：18 / 23 / 45 / 67 —— 2/3 与 6/7 两组都靠这一串的等距轮转成立
+    ks = {tuple(x["keys"]): x for x in _assign("(120){4}1/8,2/3,4/5,6/7,E").side_doubles}
+    assert (2, 3) in ks and (6, 7) in ks
+    assert all(e["guided"] and e["guide_type"] == "C" for e in ks.values())
+
+
+def test_侧边双押_D型_同键已在手下_知识030原表():
+    # 「单点铺垫 → 双押串」：手本来就在 6/7 上
+    e = _sd("(120){8}6,7,6,7,6/7,E", (6, 7))
+    assert e["guide_type"] == "D" and "D" in e["guide_types"]
+
+
+def test_侧边双押_G型_同对回访_普查新归纳():
+    # 这一对几拍前刚打过（手是"回来"不是"过去"）；紧挨着的两组是 4、5，所以不是 D
+    e = _sd("(120){8}6/7,1/2,4,5,6/7,E", (6, 7))
+    assert e["guide_type"] == "G" and "G" in e["guide_types"]
+
+
+def test_侧边双押_H型_长条压过该对键_普查新归纳():
+    e = _sd("(120){4}6h[2:1],1,2,6/7,E", (6, 7))
+    assert e["guide_type"] == "H" and "H" in e["guide_types"]
+
+
+def test_侧边双押_H型_星星终点送手_普查新归纳():
+    # 「把手划过去，再在那儿按双押」——官谱唯一能把手从远处合法带到侧边对的办法
+    e = _sd("(120){4}1-6[4:1],4,5,6/7,E", (6, 7))
+    assert e["guide_type"] == "H" and "H" in e["guide_types"]
+
+
+def test_侧边双押_F1型_镜像对带过来_普查新归纳():
+    # 先写一边（2/3）、再写另一边（6/7）：玩家第一次就学会了这个形状
+    e = _sd("(120){8}2/3,1/2,4,5,6/7,E", (6, 7))
+    assert e["guide_type"] == "F1" and "F1" in e["guide_types"]
+
+
+def test_侧边双押_F2型_同型相邻对带过来_普查新归纳():
+    # 前面已经在打"相邻两键双押"这个手型（4/5），6/7 只是换了个位置
+    e = _sd("(120){8}4/5,1,2,3,6/7,E", (6, 7))
+    assert e["guide_type"] == "F2" and "F2" in e["guide_types"]
+
+
+def test_侧边双押_E型_相邻键铺垫_普查新归纳():
+    # 前面没有双押、没有星星送手，但手就在隔壁键（1 挨着 2）
+    e = _sd("(220){8}8,1,4,2/3,E")
+    assert e["guide_type"] == "E" and e["guide_types"] == ["E"]
+
+
+# ---- 串的两处放宽（报告 §6.1 建议 3 / 4）----
+
+
+def test_侧边双押_A_B型允许中间插单点_串放宽():
+    # 1/2 与 2/3 共享 2；旧实现只因中间隔了 8,7,6 三个单点（双押串被 1 拍的间隔切断）
+    # 就判不出（官谱 `72-みんなのマイマイマー` m042 是同一回事）
+    e = _sd("(120){8}1/2,8,7,6,2/3,E")
+    assert e["guide_type"] == "A/B"
+    assert e["run_len"] == 1          # 诊断：它**不**在同一个连续双押串里
+
+
+def test_侧边双押_C型串尾非相邻对不整串作废_串放宽():
+    # 2/3→4/5→6/7→8/1 锚等距，串尾多出一个非相邻对 {5,7}；
+    # 旧实现 `any(anchor is None) → continue` 会整串作废（`141-カゲロウデイズ` Re:MAS m051）
+    e = _sd("(120){4}2/3,4/5,6/7,8/1,5/7,E", (6, 7))
+    assert e["guide_type"] == "C"
+
+
+# ---- 两级阅读窗口与"仍判不出" ----
+
+
+def test_侧边双押_拍级判不出时看乐句级_两级窗口():
+    # 前一小节末尾有 1/2（与 2/3 共享 2），本小节紧邻却是远处的单点：
+    # 拍级窗口看不到，乐句级（本小节此前 + 前一小节）看得到
+    e = _sd("(120){8}1/2,8,8,8,8,8,8,8,"
+            "7,6,7,6,2/3,,,,E")
+    assert not e["guide_types"] and e["guide_types_phrase"]
+    assert e["guided"] and e["guide_level"] == "乐句"
+
+
+def test_侧边双押_八型全不命中才算无引导():
+    # 5,6,7 离 2/3 都有 ≥2 格，没有双押、没有星星/长条 → 拍级与乐句级都判不出
+    e = _sd("(120){4}5,6,7,2/3,E")
+    assert not e["guided"] and not e["guide_types"] and not e["guide_types_phrase"]
+    assert e["guide_type"] == "" and e["guide_level"] == ""
 
 
 def test_侧边双押_无引导不因为间隔变大就翻案_去阈值():
-    # 同一形态只把 BPM 从 220 降到 150（间隔从 136 ms 变成 200 ms）。
-    # v0.2 会因为越过 140 ms 的"间隔阈值"翻成"不突然"；去阈值后判定只看有没有引导。
-    fast = _assign("(220){8}8,1,4,2/3,E").side_doubles[0]
-    slow = _assign("(150){8}8,1,4,2/3,E").side_doubles[0]
-    assert fast["redline"] and slow["redline"]
+    # 同一形态只换 BPM（间隔变大）。v0.2 会因为越过 140 ms 的"间隔阈值"翻案；
+    # 去阈值后判定只看有没有引导形态。
+    fast = _sd("(220){4}5,6,7,2/3,E")
+    slow = _sd("(120){4}5,6,7,2/3,E")
     assert not fast["guided"] and not slow["guided"]
 
 
 def test_侧边双押_永不记无理_只作复核清单():
-    # 无引导的侧边双押是"请人看一眼"，不是自动判决（"引导"的四型覆盖不全）
-    for body in ("(220){8}8,1,4,2/3,E", "(150){8}8,1,4,2/3,E"):
+    # 无引导的侧边双押是"请人看一眼"，不是自动判决（八型仍是 agent 的归纳）
+    for body in ("(220){4}5,6,7,2/3,E", "(120){4}5,6,7,2/3,E"):
         ha = _assign(body)
-        assert any(e["redline"] for e in ha.side_doubles)
+        assert any(not e["guided"] for e in ha.side_doubles)
         assert not any("侧边双押" in m.kind for m in ha.muri + ha.scrape)
-
-
-def test_侧边双押_共享键步进算引导_知识030B型():
-    # 用户例：18 / 87 / 76 / 65 / 54 —— 其中 7/6 本身就是侧边双押
-    ha = _assign("(120){4}1/8,8/7,7/6,6/5,5/4,E")
-    ev = [e for e in ha.side_doubles if e["keys"] == [6, 7]]
-    assert ev and ev[0]["guided"] and ev[0]["guide_type"] == "A/B"
-    assert not ev[0]["redline"]
-
-
-def test_侧边双押_等距轮转算引导_知识030C型():
-    # 用户例：18 / 23 / 45 / 67 —— 2/3 与 6/7 两组都靠规则轮转成立
-    ha = _assign("(120){4}1/8,2/3,4/5,6/7,E")
-    ks = {tuple(e["keys"]): e for e in ha.side_doubles}
-    assert (2, 3) in ks and (6, 7) in ks
-    assert all(e["guided"] and e["guide_type"] == "C" for e in ks.values())
-    assert not any(e["redline"] for e in ks.values())
 
 
 def test_侧边双押_判定里不留任何阈值参数():
     # 用户 2026-09-20：「怎么能量化来分析这些事情呢」——"突然"不再有数值门
     assert "side_sudden_disp" not in hd.PARAMS
     assert "side_sudden_gap_sec" not in hd.PARAMS
-    ev = _assign("(220){8}8,1,4,2/3,E").side_doubles[0]
-    assert "sudden" not in ev and "sudden_kind" not in ev
+    e = _sd("(220){8}8,1,4,2/3,E")
+    assert "sudden" not in e and "sudden_kind" not in e
+
+
+def test_侧边双押_同刻不可能有第三只手被占_普查事实():
+    # 报告 §2：388 官谱 685 次里同刻另有一只手被长条/星星占住的是 0 次——
+    # 侧边双押本身就把两只手占满，所以它的引导只能来自前面
+    ha = _assign("(120){4}6h[2:1],1,2,6/7,E")
+    ev = [e for e in ha.side_doubles if tuple(e["keys"]) == (6, 7)][0]
+    occupied = [t for t in ha.tasks
+                if t.kind in ("slide", "wifi", "hold")
+                and t.t < ev["time"] - 1e-6 < (t.t_end_nominal or t.t_end)]
+    assert not occupied
 
 
 # ---------------------------------------------------------------------------

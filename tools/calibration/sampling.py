@@ -18,6 +18,20 @@
 - **留白**：音乐里有音，谱面故意不踩。
   出处：maimai 自制谱自述「这段不好采音干脆不采了，红谱里留白的例子也不少」；
   失误版社区叫**漏音 / 漏采**（「是对音错误，漏音（没写音乐中存在的音）」）。
+- **似踩非踩**（**第四个社区说法，2026-09-20 补**）：谱面按匀速分音把小节铺满，
+  而这些音并不对应音轨实际发出的音。
+  出处：MMFC《谱面创作基础学》**5.3 踩音与配置**——
+  「海底谭的副歌采用了一种似踩非踩的写法，全程铺满 8 分音符」。
+  本地形态锚点：`resource/official-chart/336-ウミユリ海底譚-mas.txt` m030–m031。
+
+  ⚠️ **它不是第四个互斥档位**。在本工具的三词口径里它**藏在「全踩」里**——
+  铺满会把音轨那点音全都顺手盖住（所以 ``coverage`` 反而高），露馅的是 ``extra``。
+  指纹 = **匀速铺满 + coverage 高 + extra 高**，诊断字段 :attr:`BarSampling.pseudo_sample`。
+  不给它切 ``extra_ratio`` 的档：社区没有把这四个词当一组互斥分类用，
+  而"铺满得多满算铺满"一旦定阈值就又回到用户 2026-09-20 批评过的那条路上去了。
+  官谱用法（160 首实测，见 `docs/research/config-gaps-survey.md` §4）：84 首用过，
+  多数是**一两小节的过渡填充**；段落上偏好落ちサビ / Bメロ / イントロ / 間奏，
+  **最强的 ラスサビ 与 ドロップ 最不用**；与段落强度无关；8 / 12 / 16 分都写。
 
 判不出来的小节（这一小节音轨本来就没发出几个音）落 :data:`UNKNOWN`（``"—"``），
 它**不是一种采音方式**，只表示"没有依据、不下结论"。
@@ -36,7 +50,8 @@
 > 它们只是谱师描述采音疏密时各自会说的话。把连续的 coverage 切成三档**是本工具的
 > 内部口径**（:data:`THRESHOLDS`），不是社区术语定义，也**不拿去问用户**
 > （"踩七成算不算全踩"这种问题不该抛给谱师）。
-> ``coverage`` / ``extra_ratio`` / ``accent`` 等数字保留为**诊断字段**，CLI 默认不打印。
+> ``coverage`` / ``extra_ratio`` / ``accent`` / ``pseudo_sample`` 等保留为**诊断字段**，
+> CLI 默认不打印。
 
 **2026-09-20 之前的一轮修正（用户五条批评之一）**——原话：
 「什么叫采七成算不算全采？根本就没有这些词吧，这些词哪来的臆造出来的吗？
@@ -102,6 +117,12 @@ THRESHOLDS: dict = {
     "accent_margin": 0.0,       # 挑重音：均强差 > 此值才算"踩的是重音"（打平不算）
     "accent_bins": 3,           # 强度分位桶数（"命中率随强度单调上升"判据）
     "accent_min_side": 2,       # 两侧各至少这么多个有强度的事件才判挑重音
+    # ↓ 只影响 `pseudo_sample`（似踩非踩）这个**诊断标记**，**不新增档位**、不影响三个词。
+    #   三个数就是 `docs/research/config-gaps-survey.md` §4.2 把候选捞出来用的口径，
+    #   照搬过来是为了让报告与工具对得上；它们**不是术语定义、不是判据门槛**。
+    "even_tol": 0.02,           # 匀速：相邻间隔的离散系数（std/mean）小于此值
+    "even_min_slots": 8,        # 铺满：一小节至少这么多个官方时间槽
+    "pseudo_extra_lo": 1.0 / 3, # 似踩非踩：`extra_ratio` 不低于此值（"加进来的格子"够多）
 }
 
 #: 判不出来的小节（音轨这一小节本来就没发出几个音）。**不是一种采音方式**。
@@ -194,6 +215,9 @@ class BarSampling:
     accent: bool = False
     accent_reason: str = ""
     accent_delta: float = float("nan")
+    #: **似踩非踩**（MMFC 5.3）的诊断标记：匀速铺满 ∧ coverage 高 ∧ extra 高。
+    #: **不是第四个档位**——这些小节的 :attr:`mode` 绝大多数仍是「全踩」。
+    pseudo_sample: bool = False
     rest_beats: float = 0.0
     density_ratio: float = float("nan")   # 官方槽数 / pool 大小
     mode: str = UNKNOWN
@@ -209,6 +233,7 @@ class BarSampling:
                 "coverage": r(self.coverage), "extra_ratio": r(self.extra_ratio),
                 "accent": self.accent, "accent_reason": self.accent_reason,
                 "accent_delta": r(self.accent_delta),
+                "pseudo_sample": self.pseudo_sample,
                 "rest_beats": r(self.rest_beats, 3),
                 "density_ratio": r(self.density_ratio), "mode": self.mode}
 
@@ -231,6 +256,13 @@ def classify(coverage: float, extra_ratio: float, n_slots: int,
     ``extra_ratio``（谱面写了哪条轨都没有的音，社区叫**采空音 / 插空音**）与
     ``accent``（踩的是不是重音，社区叫**主高**）只作诊断字段，
     **不再各自撑起一个类名**（原来的"加花""静默""随机半采"等 agent 自造类名已整体删除）。
+
+    ⚠️ **「全踩」这一档里混着一部分其实是「似踩非踩」**（MMFC 5.3 的第四个社区说法）：
+    谱面按匀速分音把小节铺满，铺满把音轨的音全盖住了，所以 ``coverage`` 高、
+    落进「全踩」；要把它认出来得看 ``extra_ratio``（谱面格子里对不上任何 stem 的比例），
+    诊断标记是 ``pseudo_sample``。160 首实测：314 个候选里 **266 个被本函数判成「全踩」**
+    （另有 30「舍音」、14「—」、4「留白」）。**本函数不为它新增档位**——
+    社区没有把这四个词当一组互斥分类用。
     """
     th = THRESHOLDS if th is None else th
     if n_pool < th["min_pool"] or not np.isfinite(coverage):
@@ -240,6 +272,40 @@ def classify(coverage: float, extra_ratio: float, n_slots: int,
     if coverage < th["empty_hi"]:
         return "留白" if n_pool >= th["empty_min_pool"] else UNKNOWN
     return "舍音"
+
+
+def pseudo_sample_flag(slot_times: Sequence[float], coverage: float,
+                       extra_ratio: float, th: dict | None = None) -> bool:
+    """**似踩非踩**（MMFC 5.3）的诊断标记——**布尔诊断，不是第四个档位**。
+
+    三件事同时成立才置位（口径照搬 `docs/research/config-gaps-survey.md` §4.2
+    把候选捞出来用的那一套，**不是判据门槛、不是术语定义**）：
+
+    1. **匀速铺满**：官方时间槽 ≥ ``even_min_slots`` 个，且相邻间隔的离散系数
+       （std/mean）< ``even_tol``——整小节一个格子不空地匀速排着；
+    2. **coverage 高**：``coverage > full_lo``（铺满顺手把音轨那点音全盖住了，
+       所以它落在「全踩」那一档里）；
+    3. **extra 高**：``extra_ratio ≥ pseudo_extra_lo``（铺出来的格子里有一大批
+       **任何一条 stem 都对不上**——社区叫采空音 / 插空音）。
+
+    ⚠️ 第 3 条的 ``extra`` 是**代理**：它含谱师自由发挥、装饰音、**以及 onset 漏检**，
+    三者分不开（知识 032 的老问题）。所以这只是"请人看一眼"的标记，
+    **不能当成"这一小节确实是 MMFC 说的那回事"的判决**。
+
+    ⚠️ ``extra`` 高**不等于谱写坏了**——成段的高 ``extra`` 恰恰是似踩非踩这种正规写法。
+    """
+    th = THRESHOLDS if th is None else th
+    ev = np.sort(np.atleast_1d(np.asarray(slot_times, dtype=float)))
+    if ev.size < th["even_min_slots"]:
+        return False
+    d = np.diff(ev)
+    if d.size == 0 or not np.all(np.isfinite(d)) or d.mean() <= 0:
+        return False
+    if float(d.std() / d.mean()) >= th["even_tol"]:
+        return False
+    if not np.isfinite(coverage) or coverage <= th["full_lo"]:
+        return False
+    return bool(np.isfinite(extra_ratio) and extra_ratio >= th["pseudo_extra_lo"])
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +349,8 @@ def bar_metrics(slot_times: Sequence[float], note_count: int,
             "hit": hit, "extra": extra, "coverage": coverage,
             "extra_ratio": extra_ratio, "accent": acc, "accent_reason": reason,
             "accent_delta": delta, "rest_beats": rest, "mode": mode,
+            # 似踩非踩（MMFC 5.3）：**诊断标记**，与 `mode` 并行、不改 `mode`
+            "pseudo_sample": pseudo_sample_flag(ev, coverage, extra_ratio, th),
             "density_ratio": (n_slots / n_pool) if n_pool else float("nan")}
 
 
@@ -389,7 +457,8 @@ def song_sampling(bars: Sequence[tuple[int, int, float, float, float]],
                                               "extra", "coverage", "extra_ratio",
                                               "accent", "accent_reason",
                                               "accent_delta", "rest_beats",
-                                              "density_ratio", "mode")})
+                                              "density_ratio", "mode",
+                                              "pseudo_sample")})
         out.append(bs)
     return out
 
@@ -651,7 +720,8 @@ def _cli(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(
         prog="python -m tools.calibration.sampling",
-        description="采音方式度量（全踩 / 舍音 / 留白，社区用词），逐小节")
+        description="采音方式度量（全踩 / 舍音 / 留白，社区用词），逐小节"
+                    "；--diagnostics 另出「似踩非踩」（MMFC 5.3 的第四个说法）标记")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s1 = sub.add_parser("song", help="单曲逐小节表")
@@ -663,8 +733,13 @@ def _cli(argv: list[str] | None = None) -> int:
                     help="并入置信度 ≥ 此值的 basic-pitch note（默认关闭）")
     s1.add_argument("--json", default=None, help="逐小节 JSON 输出路径")
     s1.add_argument("--diagnostics", action="store_true",
-                    help="额外打印 coverage / extra / pool / 挑重音等**诊断数字**"
-                         "（默认不打印：它们是工具内部口径，不是术语）")
+                    help="额外打印 coverage / extra / pool / 挑重音 / 似踩非踩等"
+                         "**诊断数字与标记**（默认不打印：它们是工具内部口径，不是术语）。"
+                         "extra = 谱面写了、哪条 stem 都对不上的格子数占比，社区叫"
+                         "**采空音 / 插空音**——它高**不等于**谱写坏了：成段的高 extra "
+                         "恰恰是 MMFC 5.3 说的**似踩非踩**（匀速铺满但不跟音轨）这种正规写法，"
+                         "「似踩非踩」列就是「匀速铺满 + coverage 高 + extra 高」的诊断标记，"
+                         "**不是第四个档位**（这些小节的采音方式多数仍报「全踩」）")
 
     s2 = sub.add_parser("corpus", help="全库汇总（三词分布 + 对照）")
     s2.add_argument("--calib-dir", default="out/calib")
@@ -686,7 +761,8 @@ def _cli(argv: list[str] | None = None) -> int:
                              melodic_default=d["melodic_default"])
         print(f"# {d['name']}  φ*={d['phi_ms']:+.1f}ms  小节 {len(rows)}")
         if a.diagnostics:
-            print("bar  seg              采音方式  目标轨   [诊断] cov  extra pool slots 挑重音")
+            print("bar  seg              采音方式  目标轨   [诊断] cov  extra pool slots "
+                  "似踩非踩 挑重音")
         else:
             print("bar  seg              采音方式  目标轨")
         for r in rows:
@@ -695,7 +771,8 @@ def _cli(argv: list[str] | None = None) -> int:
             if a.diagnostics:
                 cov = "  n/a" if not np.isfinite(r.coverage) else f"{r.coverage:5.2f}"
                 line += (f"  {cov} {r.extra_ratio:5.2f} {r.n_pool:>4} "
-                         f"{r.n_slots:>5} {r.accent_reason}")
+                         f"{r.n_slots:>5} {'似踩非踩' if r.pseudo_sample else '    ':<8} "
+                         f"{r.accent_reason}")
             print(line)
         if a.json:
             Path(a.json).write_text(json.dumps([r.to_dict() for r in rows],

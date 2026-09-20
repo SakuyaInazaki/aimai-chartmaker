@@ -76,6 +76,7 @@
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
@@ -216,20 +217,33 @@ PARAMS: dict = {
     "hold_tail_win": 0.050,         # Hold 尾多押的判定窗口（知识 012）
     "path_brush": True,             # 轨道途经 A 区的"蹭键"检查（agent 推断，存疑）
     "path_brush_win": 0.060,        # 途经判定区的前后窗口（agent 推断）
-    # ---- 侧边双押（知识 030 铁律 + 2026-09-19 用户补充）----
+    # ---- 侧边双押（知识 030 铁律 + 2026-09-19 用户补充 + 2026-09-20 官谱普查）----
     # 知识 030 的原话逻辑只有一句：**禁止突然（＝没有引导）的侧边双押**。
-    #   引导 = A 双押带过来 / B 18·87·76·65·54（共享键环上步进） / C 18·23·45·67（相邻键对等距轮转）
-    #        （+ D 临近位置已经落在这两个键上——A 的单点版，知识 030 原表的"单点铺垫 → 双押串"）
-    #   红线 = 侧边双押 ∧ ¬引导
+    #   用户给的引导 = A 双押带过来 / B 18·87·76·65·54（共享键环上步进）
+    #                / C 18·23·45·67（相邻键对等距轮转）
+    #                （+ D 临近位置已经落在这两个键上——A 的单点版，知识 030 原表的
+    #                  "单点铺垫 → 双押串"）
+    # 388 官谱普查（`docs/research/side-double-guidance-and-chuzhang.md` §3）又归纳出
+    #   五型：G 同对回访 / H 星星·长条落点送手 / F1 镜像对 / F2 同型相邻对 / E 相邻键铺垫。
+    #   八型见 :data:`SIDE_GUIDE_TYPES`，**全部是结构关系，没有任何数值门**。
     # ⚠️ **"突然"不用数字定义**（用户 2026-09-20：「什么是侧边双押位移大的阈值……
     #    正常写谱谁去特意算这些事情」）——v0.2 曾有的"位移 ≥4 格 / 间隔 ≤140 ms"两个
     #    阈值门已整体删除，不再是规则的一部分。
     # ⚠️ 判定结果**只作复核清单**（`HandAssignment.side_doubles`），**不记无理**：
-    #    "引导"的四型是 agent 按用户三个例子归纳的，覆盖不全（388 官谱上有 307 次
-    #    落在四型之外），把它当自动硬无理等于替用户下结论。人看清单、人裁定。
-    "side_guide_gap_beats": 1.0,    # 相邻两组双押算"连续"的间隔上限（拍；同 configs 口径）
-    "side_near_slots": 2,           # "临近位置"取前面几个任务组（agent 操作化，内部口径）
-    "side_rotation_min_run": 3,     # C 型等距轮转所需的最短双押串长
+    #    八型仍是 agent 的归纳（用户只给过三个例子），覆盖率高不等于归纳正确。
+    #    人看清单、人裁定。
+    "side_read_slots": 4,           # **拍级阅读窗口** = 事件之前几个任务组（报告 §1.2 的
+                                    #   阅读粒度，agent 操作化——是"人读上下文会看的那几拍"，
+                                    #   不是判据门槛）。第二级窗口是**乐句级**（本小节此前 +
+                                    #   前一小节），那是结构单位、没有参数。
+    "side_near_slots": 2,           # **"临近位置"**（另一个结构粒度，不是阈值）：D 型问的是
+                                    #   "手**还在不在**这两个键上"，那是紧挨着的一两组的事，
+                                    #   不是"最近几拍见过"——所以 D 与 `near_dist` 诊断用它，
+                                    #   其余七型用上面的阅读窗口。
+    "side_guide_gap_beats": 1.0,    # 只供 `run_len` / `pos_in_run` 两个**诊断**字段：相邻两组
+                                    #   双押算"连续双押串"的间隔上限（拍；同 configs 口径）。
+                                    #   **A/B 与 C 的判定不再依赖它**（报告 §6.1 建议 3/4）。
+    "side_rotation_min_run": 3,     # C 型等距轮转**子段**所需的最短长度（双押个数）
     # ---- 搜索 ----
     "beam": 48,
     "force_first_hand": "",         # "L"/"R" 时强制首个任务的手（起手奇偶实验用）
@@ -530,7 +544,8 @@ class HandAssignment:
     #: 因此与 :attr:`muri` 分开：软级的撞尾/外键/路径蹭键归这里，硬/绝对仍算无理。
     scrape: list[HandMuri] = field(default_factory=list)
     infeasible: list[HandMuri] = field(default_factory=list)
-    #: 全谱侧边双押事件（知识 030：每一处**有没有引导**）。``guided=False`` 的那些
+    #: 全谱侧边双押事件（知识 030：每一处**是哪一种引导**，多标签 ``guide_types``，
+    #: 值域见 :data:`SIDE_GUIDE_TYPES`）。``guided=False`` 的那些（**乐句级窗口仍判不出**）
     #: 就是**供人复核的清单**——不记无理、不下判决，见 :func:`side_double_events`。
     side_doubles: list[dict] = field(default_factory=list)
     total_cost: float = 0.0
@@ -1318,7 +1333,8 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
         out.muri.append(hm)
         if level == "绝对" and kind in ("多押", "占用冲突", "超速"):
             out.infeasible.append(hm)
-    # 侧边双押复核清单（知识 030）：只标"有没有引导"，不记无理（见 side_double_events）
+    # 侧边双押复核清单（知识 030）：标**是哪一种引导**（八型多标签），不记无理
+    # （见 side_double_events）
     out.side_doubles = side_double_events(tasks, out.task_hand, p)
     out.muri.extend(detect_hand_muri(notes, tasks, out.task_hand, p))
     out.muri.sort(key=lambda m: m.time)
@@ -1338,6 +1354,34 @@ def assign(chart_events: ParseResult | Sequence[NoteEvent],
 _SIDE_DOUBLE_SETS = (frozenset({2, 3}), frozenset({6, 7}))
 
 
+#: 侧边双押的**引导形态**（知识 030 的用户三型 + 388 官谱普查归纳的五型；
+#: 见 `docs/research/side-double-guidance-and-chuzhang.md` §3.1）。
+#: 元组顺序 = **主形态**的优先级：用户明说过的三型（A/B、C、D）在前，
+#: 普查归纳的五型（G、H、F1、F2、E）在后。
+#: 八个标签**全部是结构关系**（共享键 / 相邻键 / 同一对 / 镜像对 / slide 终点 /
+#: 被长条压住），**没有任何数值门槛、不分档、不是术语**。
+SIDE_GUIDE_TYPES: tuple[str, ...] = ("A/B", "C", "D", "G", "H", "F1", "F2", "E")
+
+#: 八型的一句话形状说明（报告 §3.1 的"形状定义"列）。前三条的出处是用户讲授
+#: （知识 030 的 2026-09-19 补充），后五条是 388 官谱普查的 agent 归纳。
+SIDE_GUIDE_DESC: dict[str, str] = {
+    "A/B": "共享键步进：与阅读窗口里的**上一组双押共享一个键**"
+           "（用户例「双押带过来」/ 18·87·76·65·54）",
+    "C": "等距轮转：窗口里的**双押子序列**都是相邻键对、锚沿环**等距轮转**"
+         "（用户例 18·23·45·67）",
+    "D": "同键已在手下：**临近位置**（紧挨着的那一两组）已经落在这两个键之一上"
+         "——手还在那儿（用户例「单点铺垫 → 双押串」）",
+    "G": "同对回访：窗口里**整对**已经打过一次（这一对刚打过，手是回来不是过去）",
+    "H": "星星/长条落点送手：窗口里有 **slide 终点**落在该对键上，或该对键被 **hold 压过**",
+    "F1": "镜像对带过来：窗口里出现过它的**镜像对**（2/3 ↔ 6/7）",
+    "F2": "同型相邻对带过来：窗口里出现过**别的相邻两键双押**（12/34/45/56/78/18…），"
+          "手型是现成的",
+    "E": "相邻键铺垫：窗口里有与该对**环距 1** 的键——手就在隔壁",
+}
+
+_SIDE_READ_LEVELS = ("拍", "乐句")
+
+
 def _pair_anchor(keys: frozenset[int]) -> int | None:
     """相邻键对 ``{k, k+1}`` 的锚（逆时针在前的那个键）；非相邻对返回 None。"""
     if len(keys) != 2:
@@ -1350,34 +1394,87 @@ def _pair_anchor(keys: frozenset[int]) -> int | None:
     return None
 
 
+def mirror_pair(keys: frozenset[int]) -> frozenset[int]:
+    """键对关于 8–1 / 4–5 轴的**镜像对**：``{2,3} ↔ {6,7}``、``{1,2} ↔ {7,8}``…
+
+    知识 030 的侧边双押只有 ``{2,3}`` 与 ``{6,7}`` 两对，它们互为镜像——
+    官谱 F1 型「先写一边、再写另一边」靠的就是这个对称（报告 §3.2 F1）。
+    """
+    return frozenset(((9 - int(k)) % 8) or 8 for k in keys)
+
+
 def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
                        p: dict) -> list[dict]:
-    """列出全谱的**侧边双押**（``{2,3}`` / ``{6,7}``）并标注**有没有引导**。
+    """列出全谱的**侧边双押**（``{2,3}`` / ``{6,7}``）并标注**是哪一种引导**。
 
     知识 030 的铁律原话只有一句：**禁止突然（＝没有引导）的侧边双押**——
     「除非前期做好了充分多的引导，不然禁止随便写侧边双押」。用户 2026-09-19 给的
     「引导」有三个例子：A「双押带过来」/ B ``18·87·76·65·54``/ C ``18·23·45·67``。
 
-    本函数把 A/B 合并成「**与前一组双押共享键**」（前面的连续双押靠共享键步进把手
-    带到侧边，两例同型），C 实现成「**整串都是相邻键对且锚等距轮转**」，另加
-    D「**临近位置已经落在这两个键上**」（＝知识 030 原表的"单点铺垫 → 双押串"，
-    A 的单点版）。四型都是**形状判定**，没有任何数值门槛。
+    **v0.4（2026-09-20，388 官谱普查后）改为多标签**：输出 ``guide_types``
+    （:data:`SIDE_GUIDE_TYPES` 的子集，一次事件可以同时是好几种），
+    ``guided = bool(guide_types or guide_types_phrase)``；**``redline`` 字段整体删除**
+    ——那个名字本身在误导（报告 §6.1 建议 1：判据一放宽，"无引导"就从 307 掉到个位数，
+    说明问题在 agent 的归纳，不在官谱）。
 
-    ``redline = not guided``。
+    八型（形状定义见 :data:`SIDE_GUIDE_DESC`，全部是**结构关系**、零阈值）：
+
+    ====  ==========================  ===========================================
+    标签  形态                        出处
+    ====  ==========================  ===========================================
+    A/B   共享键步进                  用户 2026-09-19（知识 030）
+    C     等距轮转                    用户 2026-09-19（知识 030）
+    D     同键已在手下                知识 030 原表「单点铺垫 → 双押串」（A 的单点版）
+    G     同对回访                    388 官谱普查（报告 §3.2 G）
+    H     星星 / 长条落点送手         388 官谱普查（报告 §3.2 H）
+    F1    镜像对带过来                388 官谱普查（报告 §3.2 F1）
+    F2    同型相邻对带过来            388 官谱普查（报告 §3.2 F2）
+    E     相邻键铺垫                  388 官谱普查（报告 §3.2 E）
+    ====  ==========================  ===========================================
+
+    **两级阅读窗口**（报告 §6.1 建议 5；两级都是**结构单位**，不是可调门槛）：
+
+    1. **拍级** = 事件之前 ``side_read_slots`` 个任务组（"人读上下文会看的那几拍"）；
+       其中 **D 型另看一段更短的"临近位置"**（``side_near_slots`` 个任务组）——
+       D 问的是"手**还在不在**这两个键上"，那是紧挨着的一两组的事，不是"最近几拍见过"；
+    2. 拍级八型全不命中时再看**乐句级** = **本小节此前 + 前一小节**（D 的"临近"随之放宽）。
+
+    ``guide_types`` 是拍级窗口的命中集；拍级为空时 ``guide_types_phrase`` 给出乐句级
+    的命中集。``guide_level`` 记录是在哪一级看出来的（``"拍"`` / ``"乐句"`` / ``""``）。
+    `chart_summary` 的 ``side_double_unguided`` **只统计乐句级仍判不出的那些**。
+
+    **A/B 与 C 的"串"按报告 §6.1 建议 3/4 放宽**：
+
+    - **A/B 允许插单点**：看的是**阅读窗口里的上一组双押**，不要求它与本组在同一个
+      连续双押串里（`72-みんなのマイマイマー` m042：``1b/2b`` 与 ``2/3`` 共享 2，
+      旧实现只因中间隔了 ``8,7,6,5`` 扫键就判不出）；
+    - **C 串中一个非相邻对不整串作废**：在双押串里找**最长的等距轮转子段**
+      （`141-カゲロウデイズ` Re:MAS m051：``2/3→4/5→6/7→8/1`` 锚等距，
+      旧实现只因串尾第 5 组是 ``{5,7}`` 就 ``any(a is None) → continue`` 整串判不出）；
+      串的"连续"也改按阅读窗口判定（上一组双押落在本组的拍级窗口内），
+      不再用 ``side_guide_gap_beats`` 那个拍数——**双押之间插多少单点都不断串**。
+      C 仍然看**整串**（含事件之后的那几组）：用户给的 ``18·23·45·67`` 里，
+      ``2/3`` 的引导正是"这一串在等距轮转"这件事本身。
 
     ⚠️ **"突然"不用数字定义**（用户 2026-09-20：「什么是侧边双押位移大的阈值，不是，
     你怎么能量化来分析这些事情呢？正常写谱谁去特意算这些事情。」）——v0.2 曾用
     "位移 ≥4 格 ∨ 间隔 ≤140 ms" 当"突然"的门，两个阈值已整体删除。
 
-    ⚠️ **输出是复核清单，不是判决**：上面四型是 agent 按用户三个例子归纳的，
-    覆盖不全（388 官谱上 307 次侧边双押落在四型之外），所以 ``redline=True``
-    只表示"这一处请人看一眼"，`assign()` **不**据此记无理。
+    ⚠️ **输出是复核清单，不是判决**：八型仍是 agent 的归纳（用户只给过三个例子），
+    388 官谱上覆盖率高**不等于归纳正确**（报告 §9 局限 2），`assign()` **不**据此记无理。
 
-    事件里的 ``near_dist`` / ``gap`` 是**诊断字段**（离临近位置多少格、距上一个任务组
-    多少秒），只为人看清单时定位方便，**不参与任何判定**。
+    ⚠️ **一条普查事实**（报告 §2，记在这里免得后人再去找"长条逼出侧边双押"那条路）：
+    388 官谱 685 次侧边双押里，**同刻另有一只手被长条/星星占住的是 0 次**——
+    侧边双押本身就把两只手同时占满，任何长条/星星只能在它之前结束或在它之后开始。
+    **所以它的引导只能来自前面**，不存在"用长条钉住一只手逼出侧边双押"这种写法。
+
+    事件里的 ``near_dist`` / ``gap`` / ``hand_dist`` / ``run_len`` 是**诊断字段**
+    （离临近位置多少格、距上一个任务组多少秒、两手各要飞多远、所在连续双押串多长），
+    只为人看清单时定位方便，**不参与任何判定**。
     """
     tol = p["simul_tol"]
-    # 1) 同刻双手对（只看击打：tap / hold / 星星头）
+    read_slots = max(1, int(p["side_read_slots"]))
+    # 1) 同刻双手对（只看击打：tap / hold 头 / 星星头）
     slots: dict[int, dict[str, HandTask]] = {}
     for t, h in zip(tasks, task_hand):
         if h in ("L", "R") and t.key is not None and t.kind in _HIT_KINDS:
@@ -1387,8 +1484,10 @@ def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
     if not pair_slots:
         return []
     pairs = [(t, frozenset({d["L"].key, d["R"].key}), d) for t, d in pair_slots]
+    pair_times = [t for t, _ks, _d in pairs]
 
-    # 2) 切成"连续双押串"（相邻两组间隔 ≤ side_guide_gap_beats 拍）
+    # 2) 连续双押串（按 `side_guide_gap_beats` 的拍数切）——**只作 `run_len` /
+    #    `pos_in_run` 两个诊断字段**。A/B 与 C 的判定不再依赖它（报告 §6.1 建议 3/4）。
     runs: list[list[int]] = []
     for i, (t, _ks, d) in enumerate(pairs):
         bpm = d["L"].bpm or d["R"].bpm or 0.0
@@ -1399,94 +1498,199 @@ def side_double_events(tasks: Sequence[HandTask], task_hand: Sequence[str],
             runs.append([i])
     run_of = {i: (ri, pos) for ri, r in enumerate(runs) for pos, i in enumerate(r)}
 
-    # 3) C 型：整串都是相邻键对、锚沿环等距轮转
-    rotation_run: set[int] = set()
-    for r in runs:
-        if len(r) < p["side_rotation_min_run"]:
-            continue
-        anchors = [_pair_anchor(pairs[i][1]) for i in r]
-        if any(a is None for a in anchors):
-            continue
-        steps = [cstep(anchors[k], anchors[k + 1]) for k in range(len(anchors) - 1)]
-        if steps and all(s == steps[0] and s != 0 for s in steps):
-            rotation_run.update(r[1:])   # 串首没有"前面的引导"，不算
-
-    # 4) 每只手的上一个落键 / 上一个任务组时刻
-    t_sorted = sorted(range(len(tasks)), key=lambda i: tasks[i].t)
+    # 3) 任务组（同刻合并）= **阅读窗口的结构单位**。
+    #    每组记：时刻 / 小节 / 组内出现的全部键 / 该组之前两手各自的上一落键。
+    g_t: list[float] = []
+    g_measure: list[int] = []
+    g_keys: list[set[int]] = []
+    g_prev: list[tuple[int | None, int | None]] = []
     prev_key: dict[str, int | None] = {"L": None, "R": None}
-    snap: dict[int, tuple] = {}
-    prev_t = -1e9       # 上一个**不同刻**任务组的时刻（同刻的不算"上一个配置"）
     cur_t = -1e9
     pend: list[tuple[str, int]] = []
-    pend_keys: list[int] = []
-    near: list[list[int]] = []      # 最近 side_near_slots 个任务组的键（"谱面临近位置"）
-    win = max(1, int(p.get("side_near_slots", 2)))
-    for i in t_sorted:
+    for i in sorted(range(len(tasks)), key=lambda x: tasks[x].t):
         t, h = tasks[i], task_hand[i]
         if t.t > cur_t + tol:
-            prev_t, cur_t = cur_t, t.t
             for hh, k in pend:
                 prev_key[hh] = k
-            if pend_keys:
-                near.append(pend_keys)
-                near[:] = near[-win:]
-            pend, pend_keys = [], []
-        snap[i] = (prev_key["L"], prev_key["R"], prev_t,
-                   frozenset(k for g in near for k in g))
+            pend = []
+            cur_t = t.t
+            g_t.append(t.t)
+            g_measure.append(t.measure)
+            g_keys.append(set())
+            g_prev.append((prev_key["L"], prev_key["R"]))
         for hh in (("L", "R") if h == "LR" else ([h] if h in ("L", "R") else [])):
             if t.key is not None:
                 pend.append((hh, int(t.key)))
         if t.key is not None:
-            pend_keys.append(int(t.key))
+            g_keys[-1].add(int(t.key))
+
+    #: 每组双押所在的任务组下标（C 型的"串"按阅读窗口接续用）
+    pair_group = [min(max(bisect.bisect_left(g_t, t - tol), 0), len(g_t) - 1)
+                  for t in pair_times]
+
+    # 4) C 型：**双押子序列**上的等距轮转子段（串中一个非相邻对不整串作废）。
+    #    串的接续判据 = 上一组双押落在本组的**拍级阅读窗口**内（中间插多少单点都不断串）。
+    rotation: set[int] = set()
+    chain: list[int] = []
+    for j in range(len(pairs)):
+        if chain and pair_group[j] - pair_group[chain[-1]] <= read_slots:
+            chain.append(j)
+        else:
+            _mark_rotation(chain, pairs, rotation, p["side_rotation_min_run"])
+            chain = [j]
+    _mark_rotation(chain, pairs, rotation, p["side_rotation_min_run"])
+
+    # 5) H 型的两份素材：slide **终点**到达时刻 + hold **压住**的区间。
+    #    （知识 014：轨道任务的 `t` 是启动拍，终点用名义到达时刻。）
+    slide_ends: list[tuple[float, frozenset[int]]] = []
+    hold_spans: list[tuple[float, float, int]] = []
+    for t in tasks:
+        if t.kind in ("slide", "wifi") and t.end_key is not None:
+            ke = (frozenset(wifi_ends(t.end_key)) if t.kind == "wifi"
+                  else frozenset({int(t.end_key)}))
+            slide_ends.append((t.t_end_nominal or t.t_end, ke))
+        elif t.kind == "hold" and t.key is not None:
+            hold_spans.append((t.t, t.t_end, int(t.key)))
+
+    def _window_facts(lo: int, hi: int, near_lo: int, ev_t: float) -> tuple:
+        """把窗口 ``groups[lo:hi]`` 摊成判型要用的四件事实。
+
+        ``near_lo`` 划出**"临近位置"**那一小段（``groups[near_lo:hi]``）——只有 D 型
+        与 ``near_dist`` 诊断看它，其余七型看整个阅读窗口。
+        """
+        t_lo = g_t[lo] if hi > lo else ev_t
+        keys: set[int] = set()
+        near: set[int] = set()
+        for gi in range(lo, hi):
+            keys |= g_keys[gi]
+            if gi >= near_lo:
+                near |= g_keys[gi]
+        j0 = bisect.bisect_left(pair_times, t_lo - tol)
+        j1 = bisect.bisect_left(pair_times, ev_t - tol)
+        wpairs = [pairs[j][1] for j in range(j0, j1)]
+        sent: set[int] = set()
+        for te, ke in slide_ends:
+            if t_lo - tol <= te <= ev_t + tol:
+                sent |= ke
+        for th, te, k in hold_spans:
+            if th < ev_t + tol and te >= t_lo - tol:
+                sent.add(k)
+        return keys, wpairs, sent, near
+
+    def _guides(ks: frozenset[int], facts: tuple, is_rot: bool) -> list[str]:
+        """八型判定：全部是形状关系，**没有任何数值比较**。"""
+        keys, wpairs, sent, near = facts
+        mir = mirror_pair(ks)
+        hit: list[str] = []
+        # A/B 共享键步进：窗口里的**上一组双押**与本组共享一个键
+        if wpairs and (wpairs[-1] & ks):
+            hit.append("A/B")
+        # C 等距轮转：本组落在一段等距轮转子段里（且不是子段的头）
+        if is_rot:
+            hit.append("C")
+        # D 同键已在手下：**临近位置**已经落在这两个键之一上（手还在那儿）
+        if ks & near:
+            hit.append("D")
+        # G 同对回访：窗口里**整对**打过
+        if any(w == ks for w in wpairs):
+            hit.append("G")
+        # H 星星/长条落点送手：slide 终点落在该对键上，或该对键被 hold 压过
+        if sent & ks:
+            hit.append("H")
+        # F1 镜像对带过来
+        if any(w == mir for w in wpairs):
+            hit.append("F1")
+        # F2 同型相邻对带过来：别的**相邻两键**双押（手型是现成的）
+        if any(_pair_anchor(w) is not None and w != ks and w != mir for w in wpairs):
+            hit.append("F2")
+        # E 相邻键铺垫：手就在隔壁（环距 1）
+        if any(cdist(k, m) == 1 for k in ks for m in keys):
+            hit.append("E")
+        return hit
 
     out: list[dict] = []
     for i, (t, ks, d) in enumerate(pairs):
         if ks not in _SIDE_DOUBLE_SETS:
             continue
         ri, pos = run_of[i]
-        prev_shared = False
-        if pos > 0:
-            prev_ks = pairs[runs[ri][pos - 1]][1]
-            prev_shared = bool(prev_ks & ks)
-        guided_c = i in rotation_run
-        guided = prev_shared or guided_c
-        guide_type_set = "A/B" if prev_shared else "C" if guided_c else ""
-        # D 型引导 + 两个诊断字段（离临近位置多少格 / 距上一个任务组多久）
-        li, ri_ = d["L"].index, d["R"].index
-        pl, pr, pt, nk = snap.get(li, (None, None, -1e9, frozenset()))
-        pl2, pr2, pt2, nk2 = snap.get(ri_, (None, None, -1e9, frozenset()))
-        pt = max(pt, pt2)
-        pl = pl if pl is not None else pl2
-        pr = pr if pr is not None else pr2
-        nk = nk | nk2
+        hi = pair_group[i]                            # 本事件所在的任务组
+        lo_beat = max(0, hi - read_slots)             # 拍级窗口
+        m_ev = g_measure[hi]                          # 乐句级窗口
+        lo_phrase = hi
+        while lo_phrase > 0 and g_measure[lo_phrase - 1] >= m_ev - 1:
+            lo_phrase -= 1
+
+        near_lo = max(lo_beat, hi - max(1, int(p["side_near_slots"])))
+        f_beat = _window_facts(lo_beat, hi, near_lo, t)
+        types = _guides(ks, f_beat, i in rotation)
+        types_phrase: list[str] = []
+        level = _SIDE_READ_LEVELS[0] if types else ""
+        if not types:
+            # 乐句级：窗口整体放宽到"本小节此前 + 前一小节"，"临近"也随之放宽
+            types_phrase = _guides(
+                ks, _window_facts(lo_phrase, hi, lo_phrase, t), False)
+            level = _SIDE_READ_LEVELS[1] if types_phrase else ""
+        main = (types or types_phrase or [""])[0]
+
+        # ---- 以下全是诊断字段，不参与判定 ----
+        pl, pr = g_prev[hi]
         dl = cdist(pl, d["L"].key) if pl is not None else 4
         dr = cdist(pr, d["R"].key) if pr is not None else 4
-        # `hand_dist`（诊断）= 两只手各自要飞多远（取大者）；
-        # `near_dist`（诊断 + D 型判定）= 临近 `side_near_slots` 个任务组的键到本组
-        #   两键的最小环距。谱面开头（前面什么都没有）记 0。
-        hand_dist = max(dl, dr)
+        nk = f_beat[3]          # 诊断：离"临近位置"多少格（同 D 型的那一小段窗口）
         near_dist = (min(cdist(k, m) for k in ks for m in nk) if nk else 0)
-        gap = t - pt if pt > -1e8 else 1e9
-        # D 型引导：**临近位置已经落在这两个键上**（`near_dist == 0`）——手本来就在那儿。
-        # 依据是知识 030「类型与实例」表里原有的「**单点铺垫 → 双押串**」一型（+♂ 谱例），
-        # 是用户 A 型「双押带过来」的单点版。这是**形状**判定，不是阈值。
-        guided_d = near_dist == 0
-        guided = guided or guided_d
-        if guided_d and not guide_type_set:
-            guide_type_set = "D"
+        gap = t - g_t[hi - 1] if hi > 0 else 1e9
         out.append({
             "measure": d["L"].measure, "time": t,
             "keys": sorted(ks), "L": d["L"].key, "R": d["R"].key,
-            # ↓ 三个纯诊断字段，不参与判定
-            "hand_dist": hand_dist, "disp_l": dl, "disp_r": dr,
+            # ↓ 纯诊断字段，不参与判定
+            "hand_dist": max(dl, dr), "disp_l": dl, "disp_r": dr,
             "near_dist": near_dist,
             "gap": round(gap, 4) if gap < 1e8 else None,
             "run_len": len(runs[ri]), "pos_in_run": pos,
-            # ↓ 判定：只有"有没有引导"这一件事
-            "guided": guided, "guide_type": guide_type_set,
-            "redline": not guided,
+            # ↓ 判定：是哪一种（或哪几种）引导
+            "guided": bool(types or types_phrase),
+            "guide_types": types,
+            "guide_types_phrase": types_phrase,
+            "guide_type": main,
+            "guide_level": level,
         })
     return out
+
+
+def _mark_rotation(chain: Sequence[int], pairs: Sequence[tuple],
+                   rotation: set[int], min_run: int) -> None:
+    """在一条双押串里找出**所有等距轮转子段**，把子段里除串头外的成员记进 ``rotation``。
+
+    报告 §6.1 建议 4②：旧实现 ``any(anchor is None) → continue`` 会让
+    "串尾多出一个非相邻对"作废整串（`141-カゲロウデイズ` Re:MAS m051）。
+    这里改成：先按"是不是相邻键对"把串切成连续块，再在块内切成**等步长**的子段，
+    子段长度 ≥ ``min_run``（"几个双押才算一段轮转"的计数口径，不是难度阈值）时
+    把它的第 2 个及以后的成员记为有 C 型引导——**串首没有"前面的引导"，不算**。
+    """
+    if len(chain) < min_run:
+        return
+    anchors = [_pair_anchor(pairs[j][1]) for j in chain]
+    b = 0
+    while b < len(chain):
+        if anchors[b] is None:
+            b += 1
+            continue
+        e = b
+        while e + 1 < len(chain) and anchors[e + 1] is not None:
+            e += 1
+        # 块 [b, e] 全是相邻键对；在块内按"步长是否改变"切子段
+        s0 = b
+        while s0 < e:
+            step = cstep(anchors[s0], anchors[s0 + 1])
+            s1 = s0 + 1
+            if step != 0:
+                while (s1 + 1 <= e
+                       and cstep(anchors[s1], anchors[s1 + 1]) == step):
+                    s1 += 1
+                if s1 - s0 + 1 >= min_run:
+                    rotation.update(chain[s0 + 1:s1 + 1])
+            s0 = s1
+        b = e + 1
 
 
 def detect_hand_muri(notes: Sequence[NoteEvent], tasks: Sequence[HandTask],
@@ -1639,8 +1843,9 @@ def detect_hand_muri(notes: Sequence[NoteEvent], tasks: Sequence[HandTask],
                                 f"左手在 {lk}、右手在 {rk}（交叉深度 {dep}）"))
 
     # ⚠️ 知识 030 的「突然（＝无引导）的侧边双押」**不在这里记无理**：
-    #    "引导"的四型是 agent 按用户三个例子归纳的、覆盖不全，把它当自动判决
-    #    等于替用户下结论。无引导的侧边双押以**复核清单**的形式出在
+    #    "引导"的八型（A/B·C·D 来自用户三个例子，G·H·F1·F2·E 来自 388 官谱普查）
+    #    仍是 agent 的归纳——覆盖率高不等于归纳正确，把它当自动判决等于替用户下结论。
+    #    无引导（＝**乐句级窗口仍判不出**）的侧边双押以**复核清单**的形式出在
     #    `HandAssignment.side_doubles`（`side_double_events()`），由人裁定。
     return out
 
@@ -1774,9 +1979,14 @@ def chart_summary(ha: HandAssignment) -> dict:
             sum(b.chuzhang_end_side for b in bars)
             / max(1, sum(1 for t in ha.tasks if t.kind in ("slide", "wifi"))), 4),
         # 侧边双押复核清单（知识 030）：总数与"没有引导、请人看一眼"的数量。
-        # **不是判决**——见 `side_double_events()` 的说明。
+        # `side_double_unguided` 只数**乐句级窗口仍判不出**的那些（拍级判不出、
+        # 乐句级判得出的不计）。**不是判决**——见 `side_double_events()` 的说明。
         "side_double": len(ha.side_doubles),
         "side_double_unguided": sum(1 for e in ha.side_doubles if not e["guided"]),
+        # 八型引导的分布（主形态计数；一次事件可命中多型，这里只数主形态）
+        **{f"side_guide_{g}": sum(1 for e in ha.side_doubles
+                                  if e["guide_type"] == g)
+           for g in SIDE_GUIDE_TYPES},
         "scrape_pressure": len(ha.scrape),
         "scrape_per_1k": round(1000 * len(ha.scrape) / max(1, ha.n_tasks), 3),
         "n_infeasible": len(ha.infeasible),

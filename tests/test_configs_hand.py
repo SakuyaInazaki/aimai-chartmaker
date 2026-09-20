@@ -296,23 +296,33 @@ def test_连续双押_负例_只有两个双押():
 
 
 def test_侧边双押_无引导进复核清单_知识030():
-    # 判据来自 hands.side_double_events：只看**有没有引导**，"突然"不用数字定义
-    h = _hits("(220){8}8,1,4,2/3,E", "侧边双押")
-    assert len(h) == 1 and h[0].detail["redline"] is True
-    assert h[0].detail["guided"] is False
+    # 判据来自 hands.side_double_events：标**是哪一种引导**（八型），"突然"不用数字定义
+    h = _hits("(120){4}5,6,7,2/3,E", "侧边双押")
+    assert len(h) == 1 and h[0].detail["guided"] is False
+    assert h[0].detail["guide_types"] == [] and h[0].detail["guide_level"] == ""
+    assert "redline" not in h[0].detail
     assert "sudden" not in h[0].detail and "disp_cfg" not in h[0].detail
 
 
 def test_侧边双押_共享键步进有引导_负例_知识030B型():
     h = {tuple(x.detail["keys"]): x for x in _hits("(120){4}1/8,8/7,7/6,6/5,5/4,E", "侧边双押")}
     assert (6, 7) in h
-    assert h[(6, 7)].detail["guided"] is True and h[(6, 7)].detail["redline"] is False
+    assert h[(6, 7)].detail["guided"] is True
+    assert h[(6, 7)].detail["guide_type"] == "A/B"
 
 
 def test_侧边双押_等距轮转有引导_负例_知识030C型():
     h = {tuple(x.detail["keys"]): x for x in _hits("(120){4}1/8,2/3,4/5,6/7,E", "侧边双押")}
     assert (2, 3) in h and (6, 7) in h
-    assert all(v.detail["guide_type"] == "C" and not v.detail["redline"] for v in h.values())
+    assert all(v.detail["guide_type"] == "C" and v.detail["guided"] for v in h.values())
+
+
+def test_侧边双押_普查新归纳的五型也进detail_多标签():
+    # 报告 §3.1：原来判不出的 307 次全部落进 F1/F2/H/E/G 五型
+    h = _hits("(120){8}2/3,1/2,4,5,6/7,E", "侧边双押")
+    d = {tuple(x.detail["keys"]): x.detail for x in h}
+    assert d[(6, 7)]["guide_type"] == "F1"
+    assert set(d[(6, 7)]["guide_types"]) >= {"F1", "F2", "E"}
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +493,31 @@ def test_反手_负例_同半圈但两手都在舒适区_知识064():
     assert "反手" not in _cfgs("(150){8}1,2,3,4,1,2,3,4,E")
 
 
+def _cfgs_with_hands(body: str, hp: dict) -> set[str]:
+    """用一套指定的分配器参数算手序，再跑检测器（只为把手序钉死）。"""
+    res = _parse(body)
+    ha = H.assign(res, {**H.PARAMS, **hp})
+    return {h.config for h in ch.detect_all(res, None, ha, None)}
+
+
+def test_反手_负例_交叉但落点全在共享键_v0_3收紧crossed支():
+    # 报告 §5.5：`detect_backhand` 的 064 收紧原来**只打在"同半圈"那一支**，
+    # `crossed` 支仍按 006 中线 → 388 官谱报出的 266 段里 217 段（81.6%）没有任何
+    # 出张落点，全是 `4,5,4,5` / `1,8,1,8` 这种两手在 8–4 / 8–1 轴两侧交替。
+    # 知识 064：L→1/4 与 R→5/8 都在共享区，既不是出张、更不是"出张的极端形"。
+    for body in ("(200){16}4,5,4,5,4,5,4,5,E", "(200){16}1,8,1,8,1,8,1,8,E"):
+        assert "反手" not in _cfgs_with_hands(body, {"force_first_hand": "L"})
+
+
+def test_反手_正例_交叉且有一只手出张_v0_3收紧后仍命中():
+    # 同样是交叉（L 在 1234、R 在 5678），但 R 真的落到 6 = 出张 → 037「出张的极端形」
+    # （`w_chuzhang` 调 0 只是为了让分配器**愿意**给出这套交叉手序——官谱里它由上下文
+    #   逼出，合成片段逼不出来；`is_chuzhang` 的判定与这个权重无关。）
+    cfg = _cfgs_with_hands("(200){16}4,6,4,6,4,6,4,6,E",
+                           {"force_first_hand": "L", "w_chuzhang": 0.0})
+    assert "反手" in cfg
+
+
 def test_反手_负例_正常分页交互():
     assert "反手" not in _cfgs("(173){16}1,8,2,7,1,8,2,7,E")
 
@@ -502,8 +537,28 @@ def test_出张_负例_共享键不算出张_知识064():
     assert "出张" not in _cfgs("(120){8}7h[2:1]/2,5,8,5,8,E")
 
 
-def test_出张_负例_没有被钉住的手():
+def test_出张_负例_落点全在共享区():
+    # 没有手被钉住**也**没有任何出张落点（L 打 8/7、R 打 1/2 全在舒适区）
     assert "出张" not in _cfgs("(150){16}1,8,2,7,1,8,2,7,E")
+
+
+def test_出张_正例_纯单点出张_v0_3新增成段方式():
+    # 报告 §4.2 类 6：388 官谱 5 739 个出张落点里**纯单点出张 30.2% 是最大的一类**
+    # ——没有任何手被长条/星星占住，就是把这一下交给了对侧的手。
+    hits = _hits("(200){16}2,3,2,3,2,3,2,3,E", "出张")
+    assert hits and any(h.detail.get("mode") == "纯单点出张" for h in hits)
+    h = [x for x in hits if x.detail.get("mode") == "纯单点出张"][0]
+    assert h.detail["n_cross"] >= ch.PARAMS["chuzhang_min_cross"]
+
+
+def test_出张_两种成段方式互斥_被占手那支仍标被占手():
+    hits = _hits("(120){8}7h[2:1]/2,6,6,6,6,E", "出张")
+    assert hits and all(h.detail.get("mode") == "被占手逼出" for h in hits)
+
+
+def test_出张_负例_纯单点但落点不够成段():
+    # 只有一个出张落点：`chuzhang_min_cross` 是"几个落点才值得单独记一段"的计数口径
+    assert "出张" not in _cfgs("(150){8}1,8,7,6,5,4,8,1,E")
 
 
 def test_纵连_短纵连标单手可行_知识019补充():
