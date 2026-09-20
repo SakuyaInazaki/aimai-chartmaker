@@ -400,3 +400,47 @@ def test_slide_segments_expose_shape_keys():
     # `end_key` 的旧语义不变（单字符终点键）
     ends = [n.end_key for n in res.notes if n.kind == "slide_track"]
     assert ends == ["5", "5", "7", "8", "4", "6"]
+
+
+# ---------------------------------------------------------------------------
+# 变速（多段 `(bpm)`）——note 068 的准备核查
+# ---------------------------------------------------------------------------
+
+#: 小节**中途**换速：前半 4 个八分 @120，后半 @240
+_MIDBAR_TEMPO = "(120){8}1,2,3,4,(240)5,6,7,8,\n(120){8}1,,,,,,,,\nE\n"
+
+
+def test_tempo_time_axis_follows_current_bpm():
+    """逗号推进用**当前段** BPM；换速点之后的槽长立刻变。"""
+    res = parse_chart(_MIDBAR_TEMPO)
+    t = {n.key: n.time for n in res.notes if n.kind == "tap" and n.measure == 0}
+    # @120 一个八分 = 0.25 s；@240 = 0.125 s
+    assert abs(t["1"] - 0.00) < 1e-9 and abs(t["4"] - 0.75) < 1e-9
+    assert abs(t["5"] - 1.00) < 1e-9 and abs(t["8"] - 1.375) < 1e-9
+    assert abs(res.total_seconds - (1.0 + 0.5 + 2.0)) < 1e-9
+
+
+def test_tempo_measure_starts_are_exact_across_a_midbar_change():
+    """`measure_starts` 给的是精确小节线；用 `beat_in_measure×60/bpm` 反推会错。
+
+    第 2 小节真正开始于 1.5 s（前半 4×0.25 + 后半 4×0.125）；
+    拿换速后的 BPM=240 反推会得到 1.5 s，拿 note `5` 的 bpm 反推同样是 1.5——
+    但对**换速前**的 note 反推就是 0 + 0×… ——所以要钉的是 `measure_starts` 本身。
+    """
+    res = parse_chart(_MIDBAR_TEMPO)
+    assert abs(res.measure_starts[0] - 0.0) < 1e-9
+    assert abs(res.measure_starts[1] - 1.5) < 1e-9
+    # 每个落在小节第 0 拍上的 note，时间必须等于该小节线
+    for n in res.notes:
+        if abs(n.beat_in_measure) < 1e-9:
+            assert abs(n.time - res.measure_starts[n.measure]) < 1e-9
+
+
+def test_tempo_slide_wait_and_duration_use_the_segment_bpm():
+    """启动拍 = 60/**本段** BPM，`[x:y]` 时值同样按本段 BPM 折算。"""
+    res = parse_chart("(120){4}1-5[4:1],,,,(240)1-5[4:1],,,,\nE\n")
+    sl = [n for n in res.notes if n.kind == "slide_track"]
+    assert len(sl) == 2
+    assert abs(sl[0].wait - 0.5) < 1e-9 and abs(sl[0].duration - 0.5) < 1e-9
+    assert abs(sl[1].wait - 0.25) < 1e-9 and abs(sl[1].duration - 0.25) < 1e-9
+    assert sl[0].bpm == 120.0 and sl[1].bpm == 240.0

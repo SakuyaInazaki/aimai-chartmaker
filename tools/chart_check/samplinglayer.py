@@ -48,6 +48,26 @@ def _grid_times(bar: dict, track: str, first: float = 0.0) -> list[float]:
     return [t0 + bar_sec * i / n for i, ch in enumerate(pat) if ch in ("x", "X")]
 
 
+#: 谱面小节线与 `song_analysis.json` 小节线允许的最大偏差（秒）。
+#: 超过这个数就说明两边**不是同一张网格**（典型情形：谱面改成了变速，而 analysis
+#: 还是旧的恒定 BPM 版），这时逐小节对照没有意义——**跳过，不报假发现**。
+GRID_DRIFT_TOL = 0.050
+
+
+def _grid_drift(res, analysis: dict, first: float) -> tuple[float, int]:
+    """``(最大偏差秒, 最差的小节号)``。谱面小节线 vs analysis 的 `bars[].start_sec`。"""
+    starts = getattr(res, "measure_starts", None) or {}
+    worst, worst_bar = 0.0, -1
+    for bar in analysis.get("bars", []):
+        m = int(bar["bar"]) - 1                 # analysis 的 bar 是 1 起
+        if m not in starts:
+            continue
+        d = abs((float(bar.get("start_sec", 0.0)) - first) - starts[m])
+        if d > worst:
+            worst, worst_bar = d, int(bar["bar"])
+    return worst, worst_bar
+
+
 def check_sampling(res, analysis: dict | None, measure_texts,
                    tol: float = 0.030, first: float = 0.0) -> LayerResult:
     """`first` = `&first`（秒）。见 `_grid_times` 的说明：两套时钟必须先对齐。"""
@@ -59,6 +79,21 @@ def check_sampling(res, analysis: dict | None, measure_texts,
     segs = (analysis.get("structure") or {}).get("segments") or []
     if not bars:
         out.skipped = "song_analysis.json 里没有 bars"
+        return out
+
+    drift, bad_bar = _grid_drift(res, analysis, first)
+    if drift > GRID_DRIFT_TOL:
+        g = analysis.get("grid") or {}
+        out.skipped = (
+            f"**网格对不上，本层跳过**：谱面小节线与 `song_analysis.json` 的 "
+            f"`bars[].start_sec` 最大差 **{drift * 1000:.0f} ms**（最差在第 {bad_bar} 小节，"
+            f"容差 {GRID_DRIFT_TOL * 1000:.0f} ms）。"
+            f"analysis 的网格是 `first={g.get('first')}` / `bpm={g.get('bpm')}` / "
+            f"`bpm_changes={len(g.get('bpm_changes') or [])} 条`——"
+            "谱面改成变速之后这份 analysis 就过期了，**逐小节对照会报出一堆假的留白/采空音**。"
+            "要么重跑音频分析生成新网格的 analysis，要么别给 `--analysis`。")
+        out.stats = {"grid_drift_sec": round(drift, 4), "worst_bar": bad_bar,
+                     "first_sec": first}
         return out
 
     try:

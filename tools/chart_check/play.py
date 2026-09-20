@@ -31,12 +31,19 @@ OFFICIAL_CHUZHANG_PER_SLIDE = 0.232
 
 def _measure_locator(res):
     """``时间(秒) → 小节号``。`hands.py` 的部分标记没带小节号（`measure=0`），
-    直接拿 0 去取原文会指错地方。"""
-    starts = sorted({(n.measure, n.time - n.beat_in_measure * 60.0 / (n.bpm or 1.0))
-                     for n in res.notes})
-    by_m = {}
-    for m, t0 in starts:
-        by_m.setdefault(m, t0)
+    直接拿 0 去取原文会指错地方。
+
+    优先用 `simai_parser` 给的 `measure_starts`（解析时逐槽记下来的精确小节线）。
+    ⚠️ 旧写法 ``note.time - beat_in_measure * 60/note.bpm`` 在**小节中途换速**的那一小节
+    会算错（实测 `1789-咲キ誇レ常世ノ華` m013 差 **619 ms**），只留作没有 `measure_starts`
+    时的兜底。
+    """
+    by_m = dict(getattr(res, "measure_starts", None) or {})
+    if not by_m:
+        starts = sorted({(n.measure, n.time - n.beat_in_measure * 60.0 / (n.bpm or 1.0))
+                         for n in res.notes})
+        for m, t0 in starts:
+            by_m.setdefault(m, t0)
     items = sorted(by_m.items())
 
     def at(t: float, fallback: int) -> int:

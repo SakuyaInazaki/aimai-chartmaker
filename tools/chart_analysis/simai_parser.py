@@ -83,6 +83,10 @@ class ParseResult:
     tempo_segments: list[tuple[float, float, float]] = field(default_factory=list)
     total_beats: float = 0.0
     total_seconds: float = 0.0
+    #: ``{小节号: 该小节第 0 拍的绝对秒}``。**变速谱必须用它**——
+    #: 用 ``note.time - beat_in_measure * 60/note.bpm`` 反推小节起点，
+    #: 在小节中途换速的那一小节会错（实测 `1789-咲キ誇レ常世ノ華` m013 差 619 ms）。
+    measure_starts: dict[int, float] = field(default_factory=dict)
     has_end_marker: bool = False
     slide_chain_segments: int = 0  # 连锁 slide 的**分段**总数（对照口径用）
     each_groups: int = 0  # 含 >= 2 个 note 的时间槽个数
@@ -457,6 +461,21 @@ def parse_chart(text: str, *, name: str = "<chart>") -> ParseResult:
     i = 0
     n = len(src)
     buf: list[str] = []  # 当前时间槽累积的 note 文本
+    res.measure_starts[0] = 0.0
+
+    def _mark_measures(beat0: float, sec0: float, db: float, dt: float) -> None:
+        """一个槽跨过小节线时，按槽内匀速插值出小节线的精确秒数。
+
+        `(bpm)` 只能出现在逗号之间，所以**一个槽内 BPM 恒定**，线性插值是精确的。
+        """
+        if db <= 0:
+            return
+        m0 = int(beat0 // _BEATS_PER_MEASURE)
+        m1 = int((beat0 + db - 1e-9) // _BEATS_PER_MEASURE)
+        for m in range(m0 + 1, m1 + 2):
+            edge = m * _BEATS_PER_MEASURE
+            if beat0 < edge <= beat0 + db + 1e-9:
+                res.measure_starts.setdefault(m, sec0 + dt * (edge - beat0) / db)
 
     def flush(where: str) -> None:
         nonlocal group_index
@@ -587,6 +606,7 @@ def parse_chart(text: str, *, name: str = "<chart>") -> ParseResult:
                     continue
                 db = 4.0 / divisor
                 dt = (240.0 / bpm) / divisor
+            _mark_measures(beat, seconds, db, dt)
             beat += db
             seconds += dt
             i += 1

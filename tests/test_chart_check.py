@@ -612,3 +612,30 @@ def test_vm_comment_counts_only_lines_before_a_divisor_line():
     rep = _check("(205)\n{8}1,2,3,4,5,6,7,8,  ||a\n1,2,3,4,5,6,7,8,  ||b\nE\n")
     msg = next(i.message for i in rep.issues if i.code == "SYN-VM-COMMENT")
     assert "2 行 `||` 行尾注释" in msg and "0** 行的下一行以 `{` 开头" in msg
+
+
+def test_sampling_layer_skips_when_the_grid_does_not_match():
+    """谱面改成变速、analysis 还是旧的恒定 BPM → **跳过**，不报假的留白/采空音。"""
+    analysis = {"bars": [{"bar": i + 1, "start_sec": i * 2.0, "bpm": 120,
+                          "patterns": {"drum": "XXXX"}} for i in range(4)],
+                "structure": {"segments": [{"start_bar": 0, "end_bar": 3,
+                                            "skeleton_stem": "drum", "function": "intro"}]}}
+    # 谱面是 240 BPM（每小节 1 s），analysis 是 120 BPM（每小节 2 s）→ 第 2 小节起就差 1 s
+    body = "(240){4}1,2,3,4,\n1,2,3,4,\n1,2,3,4,\n1,2,3,4,\nE\n"
+    rep = check_chart(parse_maidata(HEAD + body, path="<t>"), analysis=analysis)
+    smp = rep.layer("采音")
+    assert smp.skipped and "网格对不上" in smp.skipped
+    assert smp.stats["grid_drift_sec"] > 0.05
+    assert not [i for i in smp.issues if i.level in ("错误", "警告")]
+
+
+def test_sampling_layer_still_runs_when_the_grid_matches():
+    """网格一致时照常跑（负例：别把正常情况也跳掉）。"""
+    analysis = {"bars": [{"bar": i + 1, "start_sec": i * 2.0, "bpm": 120,
+                          "patterns": {"drum": "XXXX"}} for i in range(4)],
+                "structure": {"segments": [{"start_bar": 0, "end_bar": 3,
+                                            "skeleton_stem": "drum", "function": "intro"}]}}
+    body = "(120){4}1,2,3,4,\n1,2,3,4,\n1,2,3,4,\n1,2,3,4,\nE\n"
+    rep = check_chart(parse_maidata(HEAD + body, path="<t>"), analysis=analysis)
+    assert not rep.layer("采音").skipped
+    assert rep.layer("采音").stats["bars"][0]["coverage"] == 1.0
