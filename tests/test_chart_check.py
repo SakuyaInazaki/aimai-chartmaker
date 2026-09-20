@@ -359,4 +359,118 @@ def test_report_renders_markdown_and_json():
     assert "外部三检待接" in md
     data = json.loads(render_json(rep))
     assert data["external_lint"].startswith("未接")
-    assert {L["layer"] for L in data["layers"]} == {"语法", "手序", "配置", "密度", "采音"}
+    assert {L["layer"] for L in data["layers"]} == {
+        "语法", "手序", "配置", "密度", "采音", "深度"}
+
+
+# ---------------------------------------------------------------------------
+# 密度层：note 种类配比对照（知识 088）——补 `e2e-trial-01` 缺口 G1
+# ---------------------------------------------------------------------------
+
+#: 只有 tap 的一张谱：slide / hold 占比都是 0，必然低于任何定数档的 Q1
+_TAP_ONLY = "(160){8}" + "".join("1,2,3,4,5,6,7,8," for _ in range(12)) + "E\n"
+#: 同样长度，但每拍一条星星 + 一条长条（note 种类配比对照的负例）
+_MIXED = ("(160){8}" + "".join("1-5[8:1],2,3h[8:1],4,5-1[8:1],6,7h[8:1],8,"
+                               for _ in range(12)) + "E\n")
+#: 头尾相连的星星链——配置识别器把它认成**一笔画**（星星族，知识 057）
+_ONESTROKE = ("(160){8}" + "".join("1-3[8:1],3-5[8:1],5-7[8:1],7-1[8:1],"
+                                   "1-3[8:1],3-5[8:1],5-7[8:1],7-1[8:1],"
+                                   for _ in range(12)) + "E\n")
+
+
+def test_density_reports_note_mix_against_level():
+    rep = _check(_TAP_ONLY, level=13.5)
+    d = rep.layer("密度").stats
+    assert "DEN-NOTEMIX" in codes(rep, "密度")
+    assert d["note_mix"]["slide"] == 0.0 and d["note_mix"]["hold"] == 0.0
+    assert d["note_mix_official"]["slide"][0] > 0.0
+
+
+def test_density_flags_slide_and_hold_below_q1():
+    rep = _check(_TAP_ONLY, level=13.5)
+    c = codes(rep, "密度")
+    assert "DEN-NOTEMIX-SLIDE-LOW" in c
+    assert "DEN-NOTEMIX-HOLD-LOW" in c
+    # 只是提示，**不是错误或警告**
+    assert "DEN-NOTEMIX-SLIDE-LOW" not in codes(rep, "密度", "错误")
+    assert "DEN-NOTEMIX-SLIDE-LOW" not in codes(rep, "密度", "警告")
+
+
+def test_density_note_mix_ok_is_not_flagged():
+    """写了星星与长条的谱不该被标「低于 Q1」（负例）。"""
+    rep = _check(_MIXED, level=13.5)
+    c = codes(rep, "密度")
+    assert "DEN-NOTEMIX-SLIDE-LOW" not in c
+    assert "DEN-NOTEMIX-HOLD-LOW" not in c
+
+
+def test_density_section_note_mix_needs_analysis():
+    """没有 `song_analysis.json` 时不报段落级对照；有了才报。"""
+    assert "DEN-NOTEMIX-SECTION" not in codes(_check(_TAP_ONLY, level=13.5))
+    analysis = {"structure": {"segments": [
+        {"start_bar": 1, "end_bar": 12, "function": "chorus", "label_ja": "サビ",
+         "skeleton_stem": "drum", "accent_stems": []}]}, "bars": []}
+    rep = _check(_TAP_ONLY, level=13.5, analysis=analysis)
+    assert "DEN-NOTEMIX-SECTION" in codes(rep, "密度")
+    sec = rep.layer("密度").stats["sections"]
+    assert sec and sec[0]["section"] == "サビ" and sec[0]["slide_ratio"] == 0.0
+
+
+def test_density_section_unknown_label_is_listed_but_not_compared():
+    """段落标签不在 160 首的表里时只记数、不对照（负例）。"""
+    analysis = {"structure": {"segments": [
+        {"start_bar": 1, "end_bar": 12, "function": "??", "label_ja": "Ｘメロ",
+         "skeleton_stem": "drum", "accent_stems": []}]}, "bars": []}
+    rep = _check(_TAP_ONLY, level=13.5, analysis=analysis)
+    assert "DEN-NOTEMIX-SECTION" not in codes(rep, "密度")
+    assert rep.layer("密度").stats["sections"][0]["section"] == "Ｘメロ"
+
+
+# ---------------------------------------------------------------------------
+# 深度层：「写得太浅？」复核清单（知识 093）——补 `e2e-trial-01` 缺口 G6
+# ---------------------------------------------------------------------------
+
+
+def test_depth_layer_needs_level():
+    rep = _check(_TAP_ONLY)           # &lv_5=13.5 会被粗取到，所以显式清空
+    md = parse_maidata(HEAD.replace("&lv_5=13.5", "&lv_5=") + _TAP_ONLY, path="<t>")
+    from tools.chart_check import check_chart as _cc
+    rep2 = _cc(md)
+    assert rep2.layer("深度").skipped
+    assert not rep.layer("深度").skipped
+
+
+def test_depth_flags_shallow_chart():
+    """只有 tap、主料里没有星星族 → 至少两条旗标 → DEP-SHALLOW。"""
+    rep = _check(_TAP_ONLY, level=13.5)
+    dep = rep.layer("深度")
+    assert "DEP-SHALLOW" in codes(rep, "深度")
+    assert len(dep.stats["flags"]) >= 2
+    assert dep.stats["star_main"] == []
+    # **只提示，不判错**
+    assert dep.count("错误") == 0 and dep.count("警告") == 0
+
+
+def test_depth_hand_hardness_is_compared_not_scored():
+    rep = _check(_TAP_ONLY, level=13.5)
+    dep = rep.layer("深度")
+    assert "DEP-HAND-HARDNESS" in codes(rep, "深度")
+    assert dep.stats["hand_hardness_official"] == (0.114, 0.093, 0.134)
+    msg = next(i.message for i in dep.issues if i.code == "DEP-HAND-HARDNESS")
+    # 知识 078 / 064 / 066 的免责必须印出来，防止把它当目标优化
+    assert "不是难度代理" in msg and "不得当作目标去优化" in msg
+
+
+def test_depth_star_family_main_is_recognised():
+    """成段的一笔画 → 主料里认得出星星族（负例：不该报"一类都没有"）。"""
+    rep = _check(_ONESTROKE, level=13.5)
+    dep = rep.layer("深度")
+    assert "一笔画" in dep.stats["star_main"]
+    assert "主料里一类星星族都没有" not in dep.stats["flags"]
+
+
+def test_depth_single_flag_is_not_shallow():
+    """只踩到一条差距时只给 `DEP-SHALLOW-1`，不给「写得太浅」清单（负例）。"""
+    rep = _check(_ONESTROKE, level=13.5)
+    c = codes(rep, "深度")
+    assert "DEP-SHALLOW-1" in c and "DEP-SHALLOW" not in c

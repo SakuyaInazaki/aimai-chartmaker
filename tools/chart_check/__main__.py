@@ -14,7 +14,7 @@ from .report import render_json, render_markdown
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="tools.chart_check",
-        description="谱面检查器：语法 / 手序 / 配置 / 密度 / 采音 五层")
+        description="谱面检查器：语法 / 手序 / 配置 / 密度 / 采音 / 深度 六层")
     ap.add_argument("maidata", help="maidata.txt 路径")
     ap.add_argument("--level", type=float, default=None,
                     help="对照定数（缺省时从 &lv_N 粗取）")

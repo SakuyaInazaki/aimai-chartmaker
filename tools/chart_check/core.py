@@ -12,6 +12,7 @@ from ._deps import hands_mod as H
 from ._deps import parse_chart
 from .configlayer import check_configs
 from .densitylayer import check_density
+from .depthlayer import check_depth
 from .excerpt import measure_texts as _measure_texts
 from .maidata import MaiData, read_maidata
 from .model import LAYERS, Issue, LayerResult
@@ -103,8 +104,9 @@ def check_chart(md: MaiData, *, inote: int | None = None,
         rep.layers.append(check_configs(res, ha,
                                         ((analysis or {}).get("structure") or {}).get("segments"),
                                         texts))
-        rep.layers.append(check_density(res, rep.level, texts))
+        rep.layers.append(check_density(res, rep.level, texts, analysis))
         rep.layers.append(check_sampling(res, analysis, texts))
+        rep.layers.append(check_depth(rep))
     else:
         for layer in LAYERS[1:]:
             lr = LayerResult(layer=layer)
