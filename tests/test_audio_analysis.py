@@ -1263,3 +1263,100 @@ def test_fx_stays_dark_when_absent():
     out, _ = stemplan.plan_stems([FakeSeg(1, 32, "verse")], feats,
                                  _FakeGrid(32), 120.0)
     assert out[0].sparse_accents == []
+
+
+# ---------------------------------------------------------------------------
+# song sheet 的「写谱提示层」（sheet.py v0.6，2026-09-20；只加不删）
+# ---------------------------------------------------------------------------
+
+from tools.audio_analysis import sheet as sheet_mod  # noqa: E402
+from tools.audio_analysis.structure import Segment  # noqa: E402
+
+
+def _seg(start, end, func, tier="mid", inten=0.5, skeleton="drum"):
+    return Segment(start_bar=start, end_bar=end, function=func,
+                   intensity=inten, intensity_tier=tier, skeleton_stem=skeleton)
+
+
+def _rows(n, **counts):
+    return [{"bar": b, "features": {k: v for k, v in counts.items()}}
+            for b in range(1, n + 1)]
+
+
+def test_writing_hints_quotes_entry_numbers_and_has_no_threshold():
+    h = sheet_mod.writing_hints(_seg(1, 8, "chorus", "high", 0.8), 13.6, "偏多")
+    assert set(h) == {"配置", "采音", "手序"}
+    # 三条都必须引用条目号
+    assert "知识 074" in h["配置"] and "知识 073" in h["配置"]
+    assert "知识 069" in h["采音"] and "知识 005" in h["采音"]
+    for k in ("064", "065", "067", "030", "082"):
+        assert k in h["手序"], k
+    # 不出现阈值：整段文字里不允许出现"≥ / ≤ / ms / 阈值"这类量化门槛
+    joined = "".join(h.values())
+    for bad in ("≥", "≤", "阈值", " ms", "毫秒"):
+        assert bad not in joined, bad
+
+
+def test_writing_hints_intro_points_to_vertical_family():
+    h = sheet_mod.writing_hints(_seg(1, 8, "intro", "low", 0.2), 13.6, "偏少")
+    assert "纵连" in h["配置"]
+
+
+def test_writing_hints_star_family_switches_with_level():
+    low = sheet_mod.writing_hints(_seg(1, 8, "chorus", "high", 0.8), 13.2, "偏多")
+    high = sheet_mod.writing_hints(_seg(1, 8, "chorus", "high", 0.8), 14.2, "偏多")
+    assert "绕圈星星" in low["配置"] and "接得顺" in low["配置"]
+    assert "三叉戟" in high["配置"] and "要分手" in high["配置"]
+
+
+def test_writing_hints_sampling_cells_follow_069():
+    dense_hot = sheet_mod.writing_hints(_seg(1, 8, "chorus", "peak", 0.9), 13.5, "偏多")
+    sparse_hot = sheet_mod.writing_hints(_seg(1, 8, "chorus", "peak", 0.9), 13.5, "偏少")
+    assert "只踩其中一部分" in dense_hot["采音"]
+    assert "都写成双押" in sparse_hot["采音"]
+
+
+def test_writing_hints_quiet_chorus_mentions_chuzhang():
+    h = sheet_mod.writing_hints(_seg(1, 8, "quiet_chorus", "mid", 0.5), 13.5, "居中")
+    assert "出张最集中" in h["手序"]
+
+
+def test_segment_pool_rank_is_relative_within_song():
+    segs = [_seg(1, 2, "intro"), _seg(3, 4, "verse"), _seg(5, 6, "chorus")]
+    rows = ([{"bar": b, "features": {"n_onset_drums": 1.0}} for b in (1, 2)]
+            + [{"bar": b, "features": {"n_onset_drums": 5.0}} for b in (3, 4)]
+            + [{"bar": b, "features": {"n_onset_drums": 9.0}} for b in (5, 6)])
+    rank = sheet_mod.segment_pool_rank(segs, rows)
+    assert rank[0] == "偏少" and rank[2] == "偏多"
+
+
+def test_song_sheet_md_contains_writing_hints_section():
+    payload = {
+        "song": {"name": "t", "duration_sec": 10.0},
+        "grid": {"bpm": 160.0, "bpm_changes": [], "first": 0.0, "n_bars": 2,
+                 "beats_per_bar": 4},
+        "offset_check": {"available": False},
+        "structure": {"method": "test"},
+        "intensity": {"climax_bar": 1, "climax_peaks": [1]},
+        "quantize": {"division_share": {"16": 1.0}, "resolved_bars": 2,
+                     "bars_with_onsets": 2, "division_histogram": {"16": 2},
+                     "division_histogram_resolved": {"16": 2},
+                     "unquantized_onsets": 0, "onsets_considered": 10,
+                     "unquantized_ratio": 0.0, "fine_blocked_bars": 0,
+                     "triplet_bars": 0, "unresolved_bars": 0, "per_track": {}},
+        "target": {"level": 13.6, "total_p10": 492, "total_p90": 967,
+                   "total_mean": 767.4, "nps": 6.13, "nps_source": "知识 031 §7",
+                   "notes_per_bar": 9.0, "notes_per_bar_level_anchor": 9.15,
+                   "density_floor": {"section": 0.6, "bar": 0.25,
+                                     "section_calibrated_optimum": 0.365},
+                   "structural_cap": {"applied": False}},
+        "warnings": [],
+    }
+    segs = [_seg(1, 1, "intro", "low", 0.2), _seg(2, 2, "chorus", "peak", 0.9)]
+    rows = [{"bar": 1, "intensity": 0.2, "division": 16, "patterns": {},
+             "features": {"n_onset_drums": 2.0}},
+            {"bar": 2, "intensity": 0.9, "division": 16, "patterns": {},
+             "features": {"n_onset_drums": 8.0}}]
+    md = sheet_mod.build_song_sheet_md(payload, segs, rows)
+    assert "## 1.5 写谱提示（按段落）" in md
+    assert "建议配置族" in md and "采音建议" in md and "手序提示" in md

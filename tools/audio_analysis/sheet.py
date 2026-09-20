@@ -236,6 +236,166 @@ def _sections(payload: dict, segments) -> list[str]:
     return L
 
 
+# ---------------- 写谱提示层（v0.6，2026-09-20 新增；只加不删） ----------------
+#
+# song sheet 原来只回答「这一段是什么、有多强、该踩哪条轨」。写谱时还缺三件：
+# **这一段官谱常用哪一族配置**、**这一段该踩多满**、**手怎么起**。
+# 本层把它们补上，全部**引用条目号、不给阈值、不下命令**——
+# 知识 071/073/074 是 agent 观察条目（未经用户确认），只能当"官谱在这类段落常用"来读。
+
+#: 知识 074 的段落地盘（日式标签 → (常用配置族, 出处一句话)）
+SECTION_CONFIG_HOME: dict[str, tuple[tuple[str, ...], str]] = {
+    "イントロ": (("纵连", "长纵连"),
+                 "知识 074：イントロ 归纵连族（长纵连 lift 3.1），几何配置一律低于基线；"
+                 "长纵连本身很简单，却是高定数谱的前奏装置"),
+    "Aメロ": (("普通交互", "跳拍", "子弹"),
+              "知识 074 没有给 Aメロ 单独的地盘；退回知识 073 的「几乎每张谱都有」"
+              "三件（子弹 / 连续双押 / 跳拍）与邻段的族"),
+    "Bメロ": (("侧边双押", "鼓动段", "二连扫", "CYCLES 型星星", "反手", "三叉戟"),
+              "知识 074：Bメロ 是侧边双押最偏爱的段落，也是「要分手的星星族」的地盘"),
+    "サビ": (("单双 / 双单", "连续双押", "双押纵", "错位", "一笔画", "连续拍滑", "穿心"),
+             "知识 074：サビ 富集双押系与错位、以及「接得顺」的星星族；"
+             "**普通交互反而被压到基线以下**——副歌不是「单点交互跑得更快」"),
+    "ラスサビ": (("连续拍滑", "一笔画", "错位", "连续双押"),
+                 "知识 074：ラスサビ 同 サビ 族，连续拍滑 lift 1.61 最高"),
+    "落ちサビ": (("出张", "绕圈星星", "穿心", "方向盘"),
+                 "知识 074/079：落ちサビ 是**出张最集中**的段落（那一段密度低、手更闲，"
+                 "正好塞一次跨界），唯一在此富集的几何配置是方向盘"),
+    "間奏": (("轴交互", "三角交互", "楼梯交互", "散点"),
+             "知识 074：間奏 是几何配置的集中地，也是**最敢采空音**的段落"),
+    "ドロップ": (("普通交互", "三角交互", "楼梯交互", "散点"),
+                 "知识 074：ドロップ 归几何配置 + 匀拍单点的普通交互"),
+    "Cメロ": (("错位", "轴交互", "定拍"),
+              "知识 074 没有给 Cメロ 单独的地盘；按「过门」读，参照 Bメロ / 間奏"),
+    "アウトロ": (("连续双押", "错位"),
+                 "知识 074：アウトロ 样本太少只能当提示——它强度最低却是高硬度富集段"
+                 "（尾杀，与知识 001 / 031 §10 一致）"),
+}
+
+#: 知识 071 的星星族换档（低定数写「接得顺」的，高定数写「要分手 / 要防蹭」的）
+STAR_BY_LEVEL_LOW = ("绕圈星星", "连续拍滑")
+STAR_BY_LEVEL_HIGH = ("二连扫", "挥手段", "三叉戟", "拆弹", "反手")
+
+
+def _skeleton_feature_key(stem: str) -> str:
+    """song sheet 的轨名 → `features` 里的 onset 计数字段。"""
+    return {"drum": "n_onset_drums", "vocal": "n_onset_vocals",
+            "bass": "n_onset_bass", "hook": "n_onset_other",
+            "melody": "n_onset_other", "piano": "n_onset_other",
+            "fx": "n_onset_fx"}.get(stem, "n_onset_drums")
+
+
+def segment_pool_rank(segments, bar_rows: list[dict]) -> dict[int, str]:
+    """每段**骨架轨给的音**在**本曲内**是偏多 / 居中 / 偏少。
+
+    ⚠️ **曲内相对分档，是 agent 操作化**——知识 069 自己也说「稀 / 中 / 密」的分档
+    是按曲内分位切的、「不是谱师会去算的量」，**只取它给出的定性方向**。
+    这里不打印任何数值切点。
+    """
+    by_bar = {int(r["bar"]): r for r in bar_rows}
+    vals: list[tuple[int, float]] = []
+    for i, s in enumerate(segments):
+        key = _skeleton_feature_key(getattr(s, "skeleton_stem", "") or "drum")
+        xs = [float((by_bar.get(b, {}).get("features") or {}).get(key, 0.0))
+              for b in range(s.start_bar, s.end_bar + 1) if b in by_bar]
+        vals.append((i, sum(xs) / len(xs) if xs else 0.0))
+    if not vals:
+        return {}
+    order = sorted(vals, key=lambda kv: kv[1])
+    n = len(order)
+    out: dict[int, str] = {}
+    for rank, (i, _v) in enumerate(order):
+        pos = rank / max(1, n - 1) if n > 1 else 0.5
+        out[i] = "偏少" if pos < 1 / 3 else ("居中" if pos < 2 / 3 else "偏多")
+    return out
+
+
+def writing_hints(seg, level: float | None, pool_rank: str) -> dict[str, str]:
+    """一段的三条写谱提示：**建议配置族 / 采音建议 / 手序提示**。
+
+    `pool_rank` ∈ {偏少, 居中, 偏多}（:func:`segment_pool_rank` 的曲内相对分档）。
+    全部引用条目号；**不给阈值、不下命令**——写的是「官谱在这类段落常用什么」。
+    """
+    ja = LABELS_JA.get(seg.function, seg.function)
+    fam, why = SECTION_CONFIG_HOME.get(ja, ((), "知识 074 没有覆盖这个标签"))
+    tier = (seg.intensity_tier or "").lower()
+    hot = tier in ("high", "peak")
+
+    # —— ① 建议配置族 ——
+    pick = list(fam[:3])
+    if level is not None:
+        stars = STAR_BY_LEVEL_HIGH if level >= 14.0 else STAR_BY_LEVEL_LOW
+        lv_note = (f"定数 {level}：知识 071 的星星族换档——"
+                   f"{'高' if level >= 14.0 else '低'}定数谱写"
+                   f"「{'要分手 / 要防蹭' if level >= 14.0 else '接得顺'}」的那种"
+                   f"（{'、'.join(stars)}）")
+    else:
+        lv_note = "没给定数 → 不按知识 071 做星星族换档"
+    cfg = (f"官谱在这类段落常用：**{('、'.join(pick) or '—')}**。{why}。{lv_note}。"
+           "⚠️ 知识 073：一张谱只用一部分配置，**主料只有四五类**、几何族只作点缀；"
+           "这里列的是候选，不是清单。")
+
+    # —— ② 采音建议（知识 069 的四格，**按本曲内相对位置**取一格） ——
+    if pool_rank == "偏多" and hot:
+        smp = ("音轨这一段给的音在本曲里**偏多**、情绪又高 → 知识 069：官谱换成"
+               "**手型预定的几何配置、只踩其中一部分**。音多不是把音都写进去的理由。")
+    elif pool_rank == "偏少" and hot:
+        smp = ("音轨这一段给的音在本曲里**偏少**、情绪却已经到顶 → 知识 069：官谱把"
+               "**每一下都写成双押并基本全踩**。情绪靠 note 种类顶上去，不靠多写音。")
+    elif pool_rank == "偏多":
+        smp = ("音多、情绪不高 → 知识 069：这是全表**踩得最省**的一格（轴交互 / "
+               "楼梯交互 / 大宇宙）。")
+    else:
+        smp = ("音不多、情绪不高 → 知识 069：官谱放**手不用动的东西**"
+               "（长纵连 / 散点 / 普通交互），采音也随之松。")
+    if seg.function in ("intro", "interlude", "outro"):
+        smp += ("　前奏 / 间奏按知识 069 第 3 条走；间奏还是知识 074 里**最敢采空音**"
+                "（写音轨里没有的音，社区词见知识 081）的段落。")
+    smp += ("　⚠️ 知识 005：采音要「简」，官谱只从候选池里挑走约一半；"
+            "知识 068：越难的段落越往**舍音 / 留白**走，而踩下去的音总量几乎不变。")
+
+    # —— ③ 手序提示 ——
+    hs = ("段首先出手 = **离上一段结束近的那只手**，新配置的起始键也可以放在"
+          "上一配置结尾键附近（知识 067）。舒适区按知识 064：左手 8765 + 1/4、"
+          "右手 1234 + 8/5；**右手落 6/7、左手落 2/3 才算出张**，轻易不要写，"
+          "写了要判断是容易游玩还是故意设置的难点，**就算是难点也要做好引导**。")
+    if seg.function == "quiet_chorus":
+        hs += "　知识 079/087：落ちサビ 是官谱出张最集中的段落（手闲），要塞跨界这里最合适。"
+    if seg.function in ("pre_chorus", "bridge"):
+        hs += "　知识 074：Bメロ 是侧边双押最偏爱的段落——写 23/67 前先把引导铺好。"
+    hs += ("　有星星线时记得知识 065：**星星头与星星条可以分属两手**，没有硬规定，"
+           "可以用它腾手。写到 `2/3`、`6/7` 这种侧边双押时按知识 030 的铁律——"
+           "禁的是**突然**，不是侧边双押本身；知识 082 给了官谱把手带过去的八种形状"
+           "（共享键步进 / 等距轮转 / 同键已在手下 / 相邻键铺垫 / 镜像对 / 同型相邻对 / "
+           "同对回访 / 星星或长条落点送手）。")
+    return {"配置": cfg, "采音": smp, "手序": hs}
+
+
+def _writing_hints_section(payload: dict, segments, bar_rows: list[dict]) -> list[str]:
+    level = (payload.get("target") or {}).get("level")
+    ranks = segment_pool_rank(segments, bar_rows)
+    L: list[str] = []
+    L.append("## 1.5 写谱提示（按段落）")
+    L.append("")
+    L.append("> ⚠️ **这一节全部来自 agent 观察条目（知识 069/071/073/074/079/082，"
+             "未经用户确认）与用户讲授的手序条目（064/065/067）。**"
+             "它写的是「**官谱在这类段落常用什么**」，**不是命令**——"
+             "选配置是谱师的定性判断（知识 073：一张谱只用一部分配置）。"
+             "本节不给任何阈值；「音偏多 / 偏少」是**曲内相对**分档，"
+             "知识 069 自己也说这个分档是 agent 操作化的。")
+    L.append("")
+    for i, s in enumerate(segments):
+        h = writing_hints(s, level, ranks.get(i, "居中"))
+        L.append(f"- **{s.start_bar}–{s.end_bar} {s.label_ja}**"
+                 f"（强度 {s.intensity:.2f}／{s.intensity_tier}，"
+                 f"骨架 {s.skeleton_stem or '—'}，本曲内骨架轨音量 {ranks.get(i, '居中')}）")
+        L.append(f"    - **建议配置族**：{h['配置']}")
+        L.append(f"    - **采音建议**：{h['采音']}")
+        L.append(f"    - **手序提示**：{h['手序']}")
+    L.append("")
+    return L
+
+
 def _bars(payload: dict, bar_rows: list[dict], segments) -> list[str]:
     order = _track_order(payload)
     seg_of_bar: dict[int, str] = {}
@@ -317,6 +477,7 @@ def _limits(payload: dict) -> list[str]:
 def build_song_sheet_md(payload: dict, segments, bar_rows: list[dict]) -> str:
     L = _header(payload)
     L += _sections(payload, segments)
+    L += _writing_hints_section(payload, segments, bar_rows)   # v0.6，只加不删
     L += _bars(payload, bar_rows, segments)
     L += _limits(payload)
     return "\n".join(L)
