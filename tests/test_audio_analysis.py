@@ -1753,3 +1753,74 @@ def test_tempo_segments_and_bar_table_on_variable_tempo():
     # 变速之后的小节应该比恒速外推得更密
     const = grid_mod.bar_start_table(a_bpm, first, n_bars=n_a + n_b)
     assert table[-1]["start_sec"] < const[-1]["start_sec"]
+
+
+def synth_backbeat(bpm: float, first: float, n_bars: int, sr: int = TSR,
+                   with_kick: bool = False):
+    """只有军鼓/拍手（在第 2、4 拍）的鼓组——判下拍相位的标准测试台。
+
+    `with_kick=True` 时再叠一层 4-on-the-floor kick，用来复现「在 drop 里数
+    backbeat 会被抹平」的失败模式。
+    """
+    spb = 60.0 / float(bpm)
+    dur = first + n_bars * 4 * spb + 1.0
+    n = int(round(dur * sr))
+    y = np.zeros(n)
+    clap = _tone_burst([600.0, 1200.0, 2500.0, 4000.0, 6000.0],
+                       int(0.05 * sr), sr, 0.010)
+    kick = _tone_burst([55.0], int(0.13 * sr), sr, 0.030)
+    bars_ = first + np.arange(n_bars) * 4 * spb
+    for k in (1, 3):                       # 第 2、4 拍
+        _place(y, bars_ + k * spb, clap, sr, 1.0)
+    y = _bandlimit(y, sr, 400.0, 12000.0)   # 真实拍手从 ~700 Hz 起有能量
+    if with_kick:
+        k4 = np.zeros(n)
+        for k in range(4):
+            _place(k4, bars_ + k * spb, kick, sr, 1.0)
+        y = y / (np.max(np.abs(y)) or 1.0) + 1.2 * _bandlimit(k4, sr, 30.0, 400.0) / (
+            np.max(np.abs(_bandlimit(k4, sr, 30.0, 400.0))) or 1.0)
+    rng = np.random.default_rng(3)
+    y = y / (np.max(np.abs(y)) or 1.0) * 0.8 + rng.standard_normal(n) * 1e-4
+    return y.astype(np.float32), float(dur)
+
+
+@pytest.mark.parametrize("shift", [0, 1, 2, 3])
+def test_downbeat_phase_picks_backbeat(shift):
+    """军鼓在 2/4 拍：给一个错了 `shift` 拍的 first，必须指回正确相位。"""
+    bpm, true_first, n_bars = 180.0, 0.5, 24
+    y, dur = synth_backbeat(bpm, true_first, n_bars)
+    spb = 60.0 / bpm
+    given = true_first + shift * spb          # 故意报晚 shift 拍
+    fl = {n: grid_mod.band_flux(y, sr=TSR, f_lo=lo, f_hi=hi)
+          for n, (lo, hi) in grid_mod.TEMPO_BANDS.items()}
+    ft = fl["snare"]["frame_times"]
+    res = grid_mod.downbeat_phase({k: v["flux"] for k, v in fl.items()}, ft,
+                                  bpm=bpm, first=given, t_start=given,
+                                  t_end=true_first + n_bars * 4 * spb,
+                                  downbeat_times=true_first + np.arange(n_bars) * 4 * spb)
+    assert res["available"]
+    assert res["shift_beats"] == shift, (shift, res["reason"])
+    assert abs(res["new_first"] - true_first) < 1e-6
+    assert res["verdict"] == ("keep" if shift == 0 else f"shift_{shift}")
+    # backbeat 只定 mod 2 —— 允许集合里必须同时含 shift 与 shift+2
+    assert sorted(res["backbeat_allowed"]) == sorted([shift, (shift + 2) % 4])
+
+
+def test_downbeat_phase_backbeat_flattened_by_four_on_the_floor():
+    """叠上 4-on-the-floor kick 后 backbeat 被抹平 —— 必须如实报「无差别」。
+
+    这正是 test-01 在 drop 段数 backbeat 得到 0.64/1.56 却在全曲平均上
+    得到 1.00 的原因：**必须挑只有军鼓/拍手的段落**。
+    """
+    bpm, first, n_bars = 180.0, 0.5, 24
+    y, dur = synth_backbeat(bpm, first, n_bars, with_kick=True)
+    fl = {n: grid_mod.band_flux(y, sr=TSR, f_lo=lo, f_hi=hi)
+          for n, (lo, hi) in grid_mod.TEMPO_BANDS.items()}
+    ft = fl["snare"]["frame_times"]
+    res = grid_mod.downbeat_phase({k: v["flux"] for k, v in fl.items()}, ft,
+                                  bpm=bpm, first=first, t_start=first,
+                                  t_end=first + n_bars * 4 * 60.0 / bpm)
+    ratios = [c["backbeat_ratio"] for c in res["candidates"]]
+    assert max(ratios) < grid_mod.TEMPO_BACKBEAT_RATIO_GATE * 1.6
+    assert res["verdict"] == "undecided" or res["shift_beats"] == 0
+    assert "军鼓/拍手" in res["reason"] or "backbeat" in res["reason"]

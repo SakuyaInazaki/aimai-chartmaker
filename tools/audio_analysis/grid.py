@@ -1808,3 +1808,173 @@ def tempo_hypothesis_verdict(res: dict) -> str:
     if c["contradicted"]:
         head += "。⚠️ 有段被音频反证，必须人工复核"
     return head + "。"
+
+
+# =====================================================================
+# v1.5.2：下拍相位四选一（test-01 第三次事故的产物）
+# =====================================================================
+#
+# 拍网格定死之后，**哪一拍是第 1 拍**仍然是未定的：四个候选相差整数拍。
+# 选错不影响 note 的绝对时刻，但**整谱的强拍位置全错**，小节线、乐句、
+# 配置的起手全部偏一拍。test-01 就栽过：我们把乐曲硬切入当成 bar1 beat1，
+# 官谱把它当成 bar2 beat1（前面一整小节空拍），整整差一拍。
+#
+# **最可靠的音乐学判据是 backbeat**：军鼓 / 拍手落在第 2、4 拍。
+# 但必须挑**只有军鼓/拍手、没有 4-on-the-floor kick 的段落**来数
+# （test-01 的「薄 build」抽掉了 sub 与 kick，只剩 clap）——
+# 在 drop 里数会被打满的 kick 和层叠的 layer 抹平（实测 0.64 对 1.56 的差别）。
+# backbeat 只能定到 **mod 2**；mod 4 要靠下拍跟踪器、和声变化点、段落进入点。
+
+TEMPO_BACKBEAT_RATIO_GATE = 1.25   # (2&4)/(1&3) 超过它才算「有 backbeat」
+
+
+def downbeat_phase(band_fluxes: dict, frame_times, bpm: float, first: float,
+                   beats_per_bar: int = 4, t_start: float | None = None,
+                   t_end: float | None = None,
+                   clap_band: str = "snare", kick_band: str = "kick",
+                   downbeat_times=None, chroma_change_times=None,
+                   section_entry_times=None, half_window: float = 0.030,
+                   ratio_gate: float = TEMPO_BACKBEAT_RATIO_GATE) -> dict:
+    """在 `beats_per_bar` 个候选相位里挑下拍相位。
+
+    候选 k（k = 0..beats_per_bar−1）表示「真正的小节线比 `first` 早 k 拍」。
+
+    证据（有几路用几路，缺的自动跳过）：
+      - **backbeat**（`band_fluxes[clap_band]`）：第 2、4 拍对第 1、3 拍的能量比，
+        **只能定 mod 2**；
+      - **下拍跟踪器**（`downbeat_times`，如 beat_this）：到各候选小节线的中位距；
+      - **和声变化点**（`chroma_change_times`）：同上；
+      - **段落进入点**（`section_entry_times`）：同上。
+
+    ⚠️ 调用方应把 `t_start` / `t_end` 限制在**只有军鼓/拍手的段落**上，
+    否则 backbeat 一路会被 4-on-the-floor 的 kick 抹平。
+    `clap_band` 建议传一条 2–9 kHz 的自定义带（`TEMPO_BANDS` 里没有），
+    拍手的噪声爆在那儿最干净。
+
+    ⚠️ **不要拿别人的谱面当兜底**：别人的 `&first` 未必对准过他自己的音频，
+    那只是一个**候选假设**。分不开时返回 `undecided`，把候选并列交人裁定。
+
+    返回 dict：逐候选的 `backbeat_ratio` / 各路中位距、`verdict`（"keep" 或
+    "shift_k"）、`shift_beats`、`new_first`、`reason`。
+    """
+    ft = np.asarray(frame_times, dtype=float)
+    spb = 60.0 / float(bpm)
+    bar = beats_per_bar * spb
+    lo = first if t_start is None else float(t_start)
+    hi = (float(ft[-1]) if ft.size else lo) if t_end is None else float(t_end)
+    n = int(beats_per_bar)
+
+    def bar_lines(p0):
+        k0 = int(np.ceil((lo - p0) / bar))
+        k1 = int(np.floor((hi - p0) / bar))
+        return p0 + np.arange(k0, max(k1, k0) + 1) * bar
+
+    # 拍手事件（主判据用）：在 clap 频带的 flux 上做峰拾取
+    clap_ev = np.zeros(0)
+    if clap_band in band_fluxes:
+        fl0 = np.asarray(band_fluxes[clap_band], dtype=float)
+        msk = (ft >= lo) & (ft < hi)
+        if msk.sum() > 10 and fl0[msk].max() > 0:
+            wgap = max(1, int(0.08 * msk.sum() / max(hi - lo, 1e-9)))
+            thr = float(np.percentile(fl0[msk][fl0[msk] > 0], 90)) if (fl0[msk] > 0).any() else 0.0
+            cand_i = np.flatnonzero(msk & (fl0 >= max(thr, 4.0)))
+            last = -10 ** 9
+            keep = []
+            for i in cand_i:
+                a0, a1 = max(0, i - wgap), min(fl0.size, i + wgap + 1)
+                if fl0[i] >= fl0[a0:a1].max() and i - last > wgap:
+                    keep.append(i)
+                    last = i
+            clap_ev = ft[np.asarray(keep, dtype=int)] if keep else np.zeros(0)
+
+    cands: list[dict] = []
+    for k in range(n):
+        p0 = first - k * spb
+        b = bar_lines(p0)
+        row = {"shift_beats": k, "phase_first": float(p0), "n_bars": int(b.size)}
+        if clap_band in band_fluxes and b.size:
+            fl = band_fluxes[clap_band]
+            odd = np.concatenate([sample_flux_at(fl, ft, b + i * spb, half_window)
+                                  for i in range(0, n, 2)])
+            even = np.concatenate([sample_flux_at(fl, ft, b + i * spb, half_window)
+                                   for i in range(1, n, 2)])
+            row["backbeat_energy_on"] = float(odd.mean())
+            row["backbeat_energy_off"] = float(even.mean())
+            row["backbeat_energy_ratio"] = float(even.mean() / max(odd.mean(), 1e-9))
+            # **主判据是「数事件」而不是「平均能量」**：能量平均会被 hat / 延音
+            # 摊平（test-01 实测 1.12 对 1.56 的差别），数拍手落在哪一拍才够锐。
+            if clap_ev.size:
+                pos = ((clap_ev - p0) % bar) / spb
+                idx = np.round(pos).astype(int) % n
+                h = np.bincount(idx, minlength=n)
+                on = int(h[0::2].sum()); off = int(h[1::2].sum())
+                row["backbeat_hist"] = [int(x) for x in h]
+                row["backbeat_n_events"] = int(h.sum())
+                row["backbeat_ratio"] = float(off / max(on, 1e-9))
+            else:
+                row["backbeat_ratio"] = row["backbeat_energy_ratio"]
+        for nm, arr in (("downbeat", downbeat_times),
+                        ("chroma", chroma_change_times),
+                        ("section", section_entry_times)):
+            if arr is None:
+                continue
+            a = np.asarray(arr, dtype=float)
+            a = a[(a >= lo) & (a < hi)]
+            row[f"{nm}_n"] = int(a.size)
+            row[f"{nm}_median_ms"] = (_median_dist(a, b) * 1000.0
+                                      if a.size and b.size else float("nan"))
+        cands.append(row)
+
+    # --- 投票 ---
+    bb = [c.get("backbeat_ratio") for c in cands]
+    has_bb = all(x is not None for x in bb) and max(bb) >= ratio_gate
+    allowed = ([c["shift_beats"] for c in cands
+                if c["backbeat_ratio"] >= ratio_gate] if has_bb
+               else [c["shift_beats"] for c in cands])
+    votes: dict[int, list[str]] = {c["shift_beats"]: [] for c in cands}
+    for nm in ("downbeat", "chroma", "section"):
+        key = f"{nm}_median_ms"
+        vals = [(c["shift_beats"], c.get(key)) for c in cands
+                if c.get(key) is not None and c.get(key) == c.get(key)]
+        vals = [(k, v) for k, v in vals if k in allowed] or vals
+        if len(vals) >= 2:
+            best = min(vals, key=lambda kv: kv[1])[0]
+            votes[best].append(nm)
+    tally = {k: len(v) for k, v in votes.items()}
+    top = max(tally, key=lambda k: tally[k]) if tally else 0
+    if has_bb and top not in allowed:
+        top = allowed[0]
+    # backbeat 把候选收窄到 mod 2 之后，只要再有**一路** mod-4 证据指向同一个，
+    # 就算定案；没有 backbeat 时要求至少两路一致。
+    decided = ((has_bb and tally.get(top, 0) >= 1)
+               or tally.get(top, 0) >= 2
+               or (has_bb and len(allowed) == 1))
+    verdict = ("keep" if top == 0 else f"shift_{top}") if decided else "undecided"
+    reason_bits = []
+    if has_bb:
+        reason_bits.append(
+            "backbeat（只定 mod 2）允许 " + "/".join(f"早{k}拍" for k in allowed)
+            + "：" + "，".join(f"早{c['shift_beats']}拍 比 {c['backbeat_ratio']:.2f}"
+                              for c in cands))
+    else:
+        reason_bits.append("backbeat 无差别（该区间可能有 4-on-the-floor kick，"
+                           "请把 t_start/t_end 限制到只有军鼓/拍手的段落）")
+    for nm in ("downbeat", "chroma", "section"):
+        key = f"{nm}_median_ms"
+        if any(c.get(key) is not None for c in cands):
+            reason_bits.append(nm + "：" + "，".join(
+                f"早{c['shift_beats']}拍 {c.get(key, float('nan')):.0f}ms" for c in cands))
+    return _json_safe({
+        "available": True,
+        "candidates": cands,
+        "votes": {str(k): v for k, v in votes.items()},
+        "backbeat_allowed": allowed,
+        "verdict": verdict,
+        "shift_beats": int(top) if decided else None,
+        "new_first": float(first - top * spb) if decided else None,
+        "ratio_gate": float(ratio_gate),
+        "reason": "；".join(reason_bits),
+        "note": "backbeat 只能定 mod 2；mod 4 靠下拍跟踪器/和声/段落进入点。"
+                "几路全分不开时**不要替人做主**：返回 undecided，由调用方把两种候选"
+                "并列写出（各自的证据强弱 + 音乐上的合理性），交人裁定",
+    })
